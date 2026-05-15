@@ -1,1 +1,18 @@
+# SpecStory / Cursor (local chat history and IDE state)
 .specstory/
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor backups
+*~
+*.swp
+*.swo
+*.bak
+
+# Logs and temp files
+*.log
+*.tmp
