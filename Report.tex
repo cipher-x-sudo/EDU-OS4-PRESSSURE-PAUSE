@@ -2,6 +2,7 @@
 
 \usepackage[margin=1in]{geometry}
 \usepackage{graphicx}
+\graphicspath{{images/}}
 \usepackage{xcolor}
 \usepackage{listings}
 \usepackage{fancyhdr}
@@ -10,6 +11,7 @@
 \usepackage{hyperref}
 \usepackage{float}
 \usepackage{array}
+\usepackage{booktabs}
 \usepackage{tcolorbox}
 \usepackage[T1]{fontenc}
 \usepackage{mathpazo}
@@ -17,6 +19,7 @@
 \usepackage{microtype}
 \usepackage{caption}
 \usepackage{tikz}
+\usetikzlibrary{arrows.meta}
 \usepackage{amsmath}
 
 \tcbuselibrary{listings, skins, breakable}
@@ -50,7 +53,7 @@
     commentstyle=\color{commentcolor}\itshape,
     stringstyle=\color{stringcolor},
     numberstyle=\scriptsize\color{numbercolor},
-    emph={uint8_t,size_t,SingleLevelPT,TwoLevelPT,HashedPT,InnerTableEntry,HashEntry},
+    emph={gfp_t,pg_data_t,struct,scan_control,nodemask_t},
     emphstyle=\color{typecolor}\bfseries,
     numbers=left,
     numbersep=12pt,
@@ -160,7 +163,7 @@
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\color{gray}CS325 Assignment 2 --- Paging}
+\fancyhead[L]{\small\color{gray}CS325 Semester Project --- PressurePause}
 \fancyhead[R]{\small\color{gray}241110, 242353}
 \fancyfoot[C]{\small\color{gray}\thepage}
 \renewcommand{\headrulewidth}{0.5pt}
@@ -179,7 +182,7 @@
     \fill[accentgold] (current page.south west) rectangle ++(25cm, 2.8cm);
     \fill[aublue] (current page.south west) ++(0,2.8cm) rectangle ++(25cm, 0.4cm);
     \node[anchor=west, text=white, font=\Large\bfseries\sffamily] at ([xshift=2cm, yshift=-2cm]current page.north west) {CS325 --- Operating Systems};
-    \node[anchor=east, text=white, font=\large\bfseries\sffamily] at ([xshift=-2cm, yshift=-2cm]current page.north east) {Assignment No.\ 2};
+    \node[anchor=east, text=white, font=\large\bfseries\sffamily] at ([xshift=-2cm, yshift=-2cm]current page.north east) {Semester Project};
     \node[anchor=center, text=white, font=\large\bfseries\sffamily] at ([yshift=1.25cm]current page.south) {Air University};
 \end{tikzpicture}
 
@@ -187,15 +190,16 @@
 
 \begin{center}
     \IfFileExists{aulogo.png}{\includegraphics[width=3cm]{aulogo.png}\\[0.8cm]}{}
-    {\color{aublue}\fontsize{32}{40}\selectfont\bfseries Paging and Page Tables}\\[0.4cm]
-    {\color{black!85}\fontsize{20}{26}\selectfont\bfseries Single-Level, Two-Level, and Hashed Page Tables}\\[1.2cm]
+    {\color{aublue}\fontsize{28}{36}\selectfont\bfseries PressurePause Reclaimer}\\[0.35cm]
+    {\color{black!85}\fontsize{16}{22}\selectfont\bfseries PSI-Gated Direct Reclaim Coordination}\\[0.25cm]
+    {\color{black!70}\fontsize{13}{18}\selectfont CS325 Semester Project (CLO 2) --- Linux Kernel Modification}\\[1.1cm]
 
     \begin{tabular}{>{\bfseries}r l}
         Course: & CS325 --- Operating Systems \\
         Instructor: & Dr. Mohammad Imran \\
         CLO: & CLO 2 \\
         Reg. IDs: & 241110, 242353 \\
-        Language: & C \\
+        Kernel tree: & Linux v6.8.12 (\texttt{LOCALVERSION=-baseline}) \\
     \end{tabular}
 \end{center}
 
@@ -203,194 +207,327 @@
 \tableofcontents
 \newpage
 
-\section{Objective}
-The objective of this assignment is to demonstrate the concept of paging in operating systems.
-The program simulates logical address translation using three page table schemes:
+\section{Introduction}
+
+When physical memory is exhausted, allocating threads can enter \textbf{direct reclaim}: they block while the kernel evicts pages synchronously. Under coordinated memory thrash, many threads reclaim in parallel, evicting pages that are immediately refaulted. The working set exceeds available RAM, swap I/O rises, and tail latency degrades.
+
+\textbf{PressurePause} is a kernel modification that adds a bounded, PSI-aware coordination step on the direct reclaim path. When memory PSI \texttt{full} indicates a system-wide stall window, the patch will wake \texttt{kswapd} explicitly and apply a short, capped wait for background progress before falling through to normal direct reclaim. The design never disables reclaim permanently and always preserves stock behavior on timeout or when no reclaimable pages exist.
+
+This report documents the development environment, baseline kernel build, and---in Section~4---identification of the target kernel component within Linux~v6.8.12. Later sections reserve space for design, implementation, evaluation, and conclusions as the patched kernel and benchmarks are completed.
+
+\section{Environment}
 
 \begin{itemize}[leftmargin=1.2cm]
-    \item Single-level page table
-    \item Two-level page table
-    \item Hashed page table
+    \item \textbf{Host:} Ubuntu 22.04 (Jammy), x86\_64
+    \item \textbf{Fallback kernel:} \texttt{6.8.0-117-generic} (distribution build)
+    \item \textbf{Custom baseline:} \texttt{6.8.12-baseline} (vanilla stable v6.8.12, unpatched)
+    \item \textbf{Source:} \texttt{kernel/linux} cloned from kernel.org stable tree, tag \texttt{v6.8.12} (recorded in \texttt{docs/kernel-tag.txt})
+    \item \textbf{Configuration:} \texttt{make defconfig} (saved as \texttt{kernel/configs/config-6.8.12-baseline})
+    \item \textbf{Build:} \texttt{make -j2 LOCALVERSION=-baseline}
+    \item \textbf{Tools:} GCC toolchain, \texttt{dwarves}, \texttt{cscope}, \texttt{stress-ng}, \texttt{linux-tools-\$(uname -r)}
 \end{itemize}
 
-The address size is assumed to be 8 bits. Each logical address is translated into a physical address, and then the program accesses data from simulated physical memory.
+Defconfig was chosen instead of copying the Ubuntu \texttt{/boot/config-*} file to avoid missing certificate paths (e.g.\ \texttt{SYSTEM\_TRUSTED\_KEYS}) that broke an earlier vanilla build attempt.
 
-\section{Address Format}
-The logical address size is:
+\section{Kernel Build and Boot}
 
-\[
-m = 8 \text{ bits}
-\]
+This section documents the steps to obtain a bootable custom baseline kernel. Terminal screenshots are included for each major step.
 
-The offset size is:
+\subsection{Host Preparation}
 
-\[
-d = 3 \text{ bits}
-\]
+Build dependencies were installed with \texttt{apt}:
 
-Therefore, the page size is:
-
-\[
-2^d = 2^3 = 8 \text{ bytes}
-\]
-
-For the single-level and hashed page tables, the remaining 5 most significant bits represent the page number:
-
-\[
-p = 8 - 3 = 5 \text{ bits}
-\]
-
-\[
-\text{Logical Address} = [\text{Page Number: 5 bits}][\text{Offset: 3 bits}]
-\]
-
-For the two-level page table, the page number is divided into two parts:
-
-\[
-p_1 = 2 \text{ bits}, \quad p_2 = 3 \text{ bits}
-\]
-
-\[
-\text{Logical Address} = [p_1: 2 \text{ bits}][p_2: 3 \text{ bits}][d: 3 \text{ bits}]
-\]
-
-\section{Memory Simulation}
-Physical memory is simulated as a byte array. The program uses 8 frames, and each frame contains 8 bytes.
-
-\[
-\text{Physical Memory Size} = 8 \times 8 = 64 \text{ bytes}
-\]
-
-After translation, the physical address is calculated using:
-
-\[
-\text{Physical Address} = (\text{Frame Number} \times \text{Page Size}) + \text{Offset}
-\]
-
-\section{Page Table Implementations}
-\subsection{Single-Level Page Table}
-The single-level page table is implemented as a simple array. The virtual page number is used directly as the index, and the value stored at that index is the frame number.
-
-\begin{codebox}[Single-level address translation]
-\begin{lstlisting}[style=cstyle]
-page = logical_address >> 3
-offset = logical_address & 7
-frame = page_table[page]
-physical_address = frame * 8 + offset
-\end{lstlisting}
-\end{codebox}
-
-\subsection{Two-Level Page Table}
-The two-level page table divides the page number into two parts. The first part selects the outer table, and the second part selects the entry inside the inner table.
-
-\begin{codebox}[Two-level address translation]
-\begin{lstlisting}[style=cstyle]
-p1 = (logical_address >> 6) & 3
-p2 = (logical_address >> 3) & 7
-offset = logical_address & 7
-frame = outer_table[p1][p2]
-physical_address = frame * 8 + offset
-\end{lstlisting}
-\end{codebox}
-
-In the implementation, the inner table is allocated only when it is needed. This shows the main idea of hierarchical paging: not every second-level table has to exist at the start.
-
-\subsection{Hashed Page Table}
-The hashed page table uses a simple hash function:
-
-\[
-\text{bucket} = \text{page number} \bmod 16
-\]
-
-The assignment allows assuming no collisions, so each used bucket stores one page number and its mapped frame number.
-
-\begin{codebox}[Hashed page table lookup]
-\begin{lstlisting}[style=cstyle]
-page = logical_address >> 3
-bucket = page % HASH_BUCKETS
-frame = hash_table[bucket].frame
-physical_address = frame * 8 + offset
-\end{lstlisting}
-\end{codebox}
-
-\section{Program Demonstration}
-The \texttt{main()} function demonstrates memory access in three steps:
-
-\begin{enumerate}[leftmargin=1.2cm]
-    \item Generate or select a logical address.
-    \item Translate the logical address into a physical address using the selected page table.
-    \item Access the data stored at that physical address.
-\end{enumerate}
-
-The following examples are used:
-
-\begin{table}[H]
-\centering
-\begin{tabular}{|>{\bfseries}l|c|c|c|c|}
-\hline
-Scheme & Logical Address & Page / Index & Offset & Frame \\
-\hline
-Single-level & 173 / 0xAD & Page 21 & 5 & 3 \\
-Two-level & 157 / 0x9D & $p_1=2$, $p_2=3$ & 5 & 5 \\
-Hashed & 26 / 0x1A & Page 3 & 2 & 1 \\
-\hline
-\end{tabular}
-\caption{Logical addresses used for demonstration.}
-\end{table}
-
-\section{Compilation and Output}
-The program can be compiled using GCC:
-
-\begin{termbox}[Compile Command]
+\begin{termbox}[Install build dependencies]
 \begin{lstlisting}[style=terminal]
-gcc main.c page_tables.c -Wall -Wextra -std=c11 -o paging_demo.exe
+sudo apt update
+sudo apt install -y build-essential libncurses-dev bison flex libssl-dev \
+  libelf-dev bc dwarves git cscope stress-ng linux-tools-common \
+  linux-tools-$(uname -r)
 \end{lstlisting}
 \end{termbox}
 
-The output of the program is shown below:
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{phase0-apt-deps.png}
+    \caption{Installing kernel build and benchmark packages; all packages were already present on the host.}
+\end{figure}
 
-\newpage
+\subsection{Source Tree}
+
+The stable kernel was cloned shallowly on branch \texttt{v6.8}, then checked out at tag \texttt{v6.8.12}:
+
+\begin{termbox}[Clone and pin kernel tag]
+\begin{lstlisting}[style=terminal]
+cd /home/huzaifa/EDU-OS4-KILL-LOOP
+mkdir -p kernel docs kernel/configs kernel/patches
+git clone --depth=1 --branch v6.8 \
+  https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git kernel/linux
+cd kernel/linux
+git fetch --depth=1 origin tag v6.8.12
+git checkout v6.8.12
+git describe --always > ../../docs/kernel-tag.txt
+\end{lstlisting}
+\end{termbox}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=\linewidth]{real_terminal_output.png}
-    \caption{Program output after compiling and running the paging demonstration.}
+    \includegraphics[width=\linewidth]{phase1-clone-v6.8.12.png}
+    \caption{Cloning the stable tree and checking out tag v6.8.12 (\texttt{HEAD} at commit for Linux 6.8.12).}
 \end{figure}
 
-\section{Source Code}
-The complete source code is divided into three files: \texttt{main.c}, \texttt{page\_tables.h}, and \texttt{page\_tables.c}.
+\subsection{Kernel Configuration}
 
-\subsection{\texttt{main.c}}
-\begin{codebox}[main.c]
-\lstinputlisting[style=cstyle]{main.c}
-\end{codebox}
+A default x86\_64 configuration was generated and saved for reproducibility:
 
-\subsection{\texttt{page\_tables.h}}
-\begin{codebox}[page\_tables.h]
-\lstinputlisting[style=cstyle]{page_tables.h}
-\end{codebox}
+\begin{termbox}[defconfig]
+\begin{lstlisting}[style=terminal]
+cd kernel/linux
+make defconfig
+make olddefconfig
+cp .config ../configs/config-6.8.12-baseline
+\end{lstlisting}
+\end{termbox}
 
-\subsection{\texttt{page\_tables.c}}
-\begin{codebox}[page\_tables.c]
-\lstinputlisting[style=cstyle]{page_tables.c}
-\end{codebox}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{phase1-defconfig.png}
+    \caption{\texttt{make defconfig} based on \texttt{x86\_64\_defconfig}; configuration written to \texttt{.config} and copied to \texttt{kernel/configs/}.}
+\end{figure}
 
-\section{Conclusion}
-This assignment shows how paging translates logical addresses into physical addresses. The single-level page table uses direct indexing, the two-level page table divides the page number into two indexes, and the hashed page table uses a hash bucket for lookup. In all three cases, the final physical address is formed by combining the mapped frame number with the offset.
+\subsection{Compilation}
 
-\section{Submission Files}
-Only the following source files should be placed inside the final submission folder:
+The kernel was built with a distinct \texttt{LOCALVERSION} suffix so it does not collide with distribution packages:
+
+\begin{termbox}[Build baseline kernel]
+\begin{lstlisting}[style=terminal]
+make -j2 LOCALVERSION=-baseline 2>&1 | tee ~/build.log
+\end{lstlisting}
+\end{termbox}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{phase1-bzimage-ready.png}
+    \caption{Successful build: \texttt{arch/x86/boot/bzImage} is ready for installation.}
+\end{figure}
+
+\subsection{Installation}
+
+After a successful \texttt{make}, modules and the boot image were installed:
+
+\begin{termbox}[Install kernel]
+\begin{lstlisting}[style=terminal]
+sudo make modules_install install
+\end{lstlisting}
+\end{termbox}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{phase1-modules-install.png}
+    \caption{\texttt{modules\_install} and \texttt{install} placing \texttt{vmlinuz-6.8.12-baseline} and modules under \texttt{/lib/modules/6.8.12-baseline/}.}
+\end{figure}
+
+\subsection{Bootloader Update}
+
+GRUB was regenerated so the new kernel appears in the boot menu:
+
+\begin{termbox}[Update GRUB]
+\begin{lstlisting}[style=terminal]
+sudo update-grub
+ls /boot/vmlinuz*
+\end{lstlisting}
+\end{termbox}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{phase1-update-grub.png}
+    \caption{\texttt{update-grub} detected \texttt{/boot/vmlinuz-6.8.12-baseline} alongside Ubuntu \texttt{6.8.0-117-generic} and \texttt{6.8.0-40-generic}.}
+\end{figure}
+
+\subsection{Boot Verification}
+
+\textbf{Pending:} Screenshots of the GRUB menu (Advanced options $\rightarrow$ \texttt{6.8.12-baseline}) and \texttt{uname -r} output confirming \texttt{6.8.12-baseline} after reboot are not yet included. Boot verification should be completed before the final submission; the fallback Ubuntu entry remains available if the custom kernel fails.
+
+\section{Component Identification}
+
+This section satisfies the course requirement to identify the selected kernel component within the source tree. The analysis targets Linux \textbf{v6.8.12} in \texttt{kernel/linux}. A markdown companion is maintained at \texttt{docs/identification.md}.
+
+\subsection{Selected Component}
 
 \begin{itemize}[leftmargin=1.2cm]
-    \item \texttt{main.c}
-    \item \texttt{page\_tables.c}
-    \item \texttt{page\_tables.h}
+    \item \textbf{Course category:} Page replacement / reclaim (PressurePause extends direct reclaim coordination).
+    \item \textbf{Primary files:} \texttt{mm/page\_alloc.c} (allocation slowpath), \texttt{mm/vmscan.c} (reclaim engine).
+    \item \textbf{Supporting context:} \texttt{kernel/sched/psi.c}, \texttt{include/linux/psi\_types.h} (PSI accounting).
+    \item \textbf{Planned hook (Phase~3):} \texttt{do\_try\_to\_free\_pages()} in \texttt{mm/vmscan.c}, line~6188, immediately before the priority loop that calls \texttt{shrink\_zones()}.
 \end{itemize}
 
-The folder and ZIP file should be named using the required format:
+\subsection{Call Graph: Allocation to Reclaim}
+
+When \texttt{get\_page\_from\_freelist()} cannot satisfy an allocation (zone free pages below watermarks), control enters the allocator slowpath and eventually direct reclaim:
+
+\begin{enumerate}[leftmargin=1.2cm]
+    \item \texttt{\_\_alloc\_pages\_slowpath} --- \texttt{mm/page\_alloc.c} $\sim$4040
+    \item \texttt{wake\_all\_kswapds} --- \texttt{mm/page\_alloc.c} $\sim$3814 (background reclaim hint)
+    \item \texttt{\_\_alloc\_pages\_direct\_reclaim} --- \texttt{mm/page\_alloc.c} $\sim$3781
+    \item \texttt{psi\_memstall\_enter} / \texttt{\_\_perform\_reclaim} --- \texttt{mm/page\_alloc.c} $\sim$3755--3790
+    \item \texttt{try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6406
+    \item \texttt{do\_try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6188 \textbf{[planned hook]}
+    \item \texttt{shrink\_zones} $\rightarrow$ \texttt{shrink\_node} --- \texttt{mm/vmscan.c} $\sim$6065 / $\sim$5881
+\end{enumerate}
 
 \begin{center}
-\texttt{REGID1\_REGID2.zip}
+\begin{tikzpicture}[
+    node distance=0.55cm and 0.3cm,
+    every node/.style={font=\small\sffamily, align=center},
+    arr/.style={-{Stealth[length=2mm]}, thick, color=aublue!70}
+]
+\node (slow) [draw, rounded corners, fill=codebg] {slowpath\\\texttt{page\_alloc.c}};
+\node (wake) [draw, rounded corners, fill=codebg, below=of slow] {wake\_kswapd};
+\node (direct) [draw, rounded corners, fill=codebg, below=of wake] {direct\_reclaim};
+\node (try) [draw, rounded corners, fill=codebg, below=of direct] {try\_to\_free\_pages};
+\node (hook) [draw, rounded corners, fill=accentgold!15, thick, below=of try] {do\_try\_to\_free\_pages\\\textbf{hook}};
+\node (shrink) [draw, rounded corners, fill=codebg, below=of hook] {shrink\_zones $\rightarrow$ shrink\_node};
+\draw[arr] (slow) -- (wake);
+\draw[arr] (wake) -- (direct);
+\draw[arr] (direct) -- (try);
+\draw[arr] (try) -- (hook);
+\draw[arr] (hook) -- (shrink);
+\end{tikzpicture}
 \end{center}
+
+\subsection{Key Code Excerpts}
+
+\textbf{Direct reclaim entry from the allocator} (\texttt{mm/page\_alloc.c}):
+
+\begin{codebox}[mm/page\_alloc.c: \_\_perform\_reclaim (lines 3753--3770)]
+\begin{lstlisting}[style=cstyle]
+/* Perform direct synchronous page reclaim */
+static unsigned long
+__perform_reclaim(gfp_t gfp_mask, unsigned int order,
+                  const struct alloc_context *ac)
+{
+    ...
+    progress = try_to_free_pages(ac->zonelist, order, gfp_mask,
+                                 ac->nodemask);
+    ...
+    return progress;
+}
+\end{lstlisting}
+\end{codebox}
+
+\textbf{Public direct-reclaim wrapper} (\texttt{mm/vmscan.c}):
+
+\begin{codebox}[mm/vmscan.c: try\_to\_free\_pages (lines 6406--6446)]
+\begin{lstlisting}[style=cstyle]
+unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
+                                gfp_t gfp_mask, nodemask_t *nodemask)
+{
+    struct scan_control sc = { ... };
+    ...
+    trace_mm_vmscan_direct_reclaim_begin(order, sc.gfp_mask);
+    nr_reclaimed = do_try_to_free_pages(zonelist, &sc);
+    trace_mm_vmscan_direct_reclaim_end(nr_reclaimed);
+    ...
+    return nr_reclaimed;
+}
+\end{lstlisting}
+\end{codebox}
+
+\textbf{Reclaim loop and planned hook site} (\texttt{mm/vmscan.c}):
+
+\begin{codebox}[mm/vmscan.c: do\_try\_to\_free\_pages (lines 6188--6206)]
+\begin{lstlisting}[style=cstyle]
+static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
+                                          struct scan_control *sc)
+{
+    ...
+    do {
+        sc->nr_scanned = 0;
+        shrink_zones(zonelist, sc);   /* LRU eviction per zone */
+        if (sc->nr_reclaimed >= sc->nr_to_reclaim)
+            break;
+        ...
+    } while (--sc->priority >= 0);
+    ...
+}
+\end{lstlisting}
+\end{codebox}
+
+\subsection{Watermarks}
+
+Reclaim is triggered when a zone's free page count falls below configured \textbf{min}, \textbf{low}, or \textbf{high} watermarks during allocation. The fast path in \texttt{get\_page\_from\_freelist()} fails; \texttt{\_\_alloc\_pages\_slowpath()} may wake \texttt{kswapd}, attempt compaction, and finally call \texttt{\_\_alloc\_pages\_direct\_reclaim()} so the allocating thread performs synchronous reclaim.
+
+\subsection{kswapd vs.\ Direct Reclaim}
+
+Both paths converge on \texttt{shrink\_node()}, but they differ in caller context and entry points:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}p{3.2cm}p{5.2cm}p{5.2cm}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Direct reclaim} & \textbf{kswapd} \\
+\midrule
+Caller & Allocating task (slowpath) & \texttt{kswapd} kernel thread ($\sim$7078) \\
+Entry & \texttt{try\_to\_free\_pages} & \texttt{balance\_pgdat} $\rightarrow$ \texttt{kswapd\_shrink\_node} \\
+Shared core & \texttt{shrink\_node} & \texttt{shrink\_node} \\
+GFP context & Caller's \texttt{gfp\_mask} & \texttt{GFP\_KERNEL} \\
+PressurePause & Yes (hook at \texttt{do\_try\_to\_free\_pages}) & No (unless explicitly guarded) \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of foreground direct reclaim and background \texttt{kswapd}.}
+\end{table}
+
+\subsection{Pressure Stall Information (PSI)}
+
+PSI accounts time tasks spend stalled on memory, I/O, or CPU. For PressurePause, the relevant signal is memory PSI \textbf{full}: periods when stalled tasks exist and no other tasks are making productive forward progress on memory.
+
+\begin{itemize}[leftmargin=1.2cm]
+    \item \textbf{Types:} \texttt{PSI\_MEM\_SOME}, \texttt{PSI\_MEM\_FULL} in \texttt{include/linux/psi\_types.h}
+    \item \textbf{Accounting:} \texttt{kernel/sched/psi.c}
+    \item \textbf{Userspace:} \texttt{/proc/pressure/memory} (\texttt{some} vs.\ \texttt{full} averages)
+\end{itemize}
+
+\texttt{psi\_memstall\_enter()} in \texttt{\_\_alloc\_pages\_direct\_reclaim} marks the \emph{current allocating task} as memory-stalled during reclaim for PSI statistics. That is distinct from reading system-wide \texttt{full} averages, which the patch will use to decide whether to apply bounded coordination before \texttt{shrink\_zones()}.
+
+\subsection{Hook Justification}
+
+\texttt{shrink\_node()} is shared by both \texttt{kswapd} and direct reclaim. Hooking only at \texttt{do\_try\_to\_free\_pages()} limits changes to the allocating-thread path without affecting background reclaim unless explicitly intended. Hooking at \texttt{shrink\_node()} would require \texttt{!current\_is\_kswapd()} guards and a broader behavioral surface.
+
+Identification screenshots (editor views of \texttt{vmscan.c}, \texttt{grep} call chains, or \texttt{/proc/pressure/memory} under load) may be added in a future revision; this section relies on verified line numbers from the v6.8.12 tree.
+
+\section{Design and Alternative Methodologies}
+
+\textbf{Chosen approach:} PSI-gated bounded backoff on direct reclaim entry---wake \texttt{kswapd}, wait up to \texttt{PRESSURE\_PAUSE\_MAX\_MS}, then fall through to stock reclaim on timeout or lack of progress.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}p{3.5cm}p{5cm}p{5cm}@{}}
+\toprule
+\textbf{Approach} & \textbf{Pros} & \textbf{Cons} \\
+\midrule
+A. PSI-gated backoff (chosen) & Uses kernel stall signal; small code surface & Lock-context constraints; must validate no regressions \\
+B. Fixed sleep in reclaim & Simple to implement & Blind to real pressure; may delay recovery \\
+C. User-space only (swappiness, cgroups) & No kernel patch risk & Does not satisfy course kernel-modification requirement \\
+\bottomrule
+\end{tabular}
+\caption{Alternative methodologies considered for coordinating reclaim under thrash.}
+\end{table}
+
+Detailed BEFORE/AFTER flow diagrams and constant definitions (\texttt{PSI\_FULL\_THRESHOLD}, \texttt{PRESSURE\_PAUSE\_MAX\_MS}) will be completed with the Phase~3 patch.
+
+\section{Implementation}
+
+\textit{To be completed after applying the PressurePause patch to \texttt{mm/vmscan.c}, building \texttt{LOCALVERSION=-pressurepause}, and capturing \texttt{git format-patch} output in \texttt{kernel/patches/}.}
+
+\section{Correctness and Safety}
+
+\textit{To be completed. Planned invariants: bounded wait; never skip reclaim entirely; fall through on timeout or no reclaimable pages; GRUB fallback to Ubuntu kernel if the patched build panics.}
+
+\section{Evaluation}
+
+\textit{To be completed. Comparative benchmarks will run only on custom kernels: \texttt{6.8.12-baseline} (before) vs.\ \texttt{6.8.12-pressurepause} (after), using \texttt{stress-ng}, \texttt{vmstat}, \texttt{/proc/pressure/memory}, and \texttt{/proc/vmstat} (\texttt{pgmajfault}). Results will be stored under \texttt{results/}.}
+
+\section{Conclusion}
+
+The baseline Linux~v6.8.12 kernel was built and installed with \texttt{LOCALVERSION=-baseline}. The reclaim component was identified on the direct allocation path from \texttt{page\_alloc.c} through \texttt{try\_to\_free\_pages} and \texttt{do\_try\_to\_free\_pages} in \texttt{vmscan.c}, with PSI providing the system-wide stall signal for the planned modification. Remaining work includes boot verification screenshots, patch implementation, patched-kernel benchmarks, and final results discussion.
 
 \end{document}
