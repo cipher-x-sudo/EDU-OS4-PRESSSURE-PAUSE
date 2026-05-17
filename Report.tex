@@ -1,0 +1,396 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{array}
+\usepackage{tcolorbox}
+\usepackage[T1]{fontenc}
+\usepackage{mathpazo}
+\usepackage{helvet}
+\usepackage{microtype}
+\usepackage{caption}
+\usepackage{tikz}
+\usepackage{amsmath}
+
+\tcbuselibrary{listings, skins, breakable}
+
+\definecolor{aublue}{RGB}{30,50,90}
+\definecolor{lightgray}{RGB}{245,245,245}
+\definecolor{codebg}{RGB}{248,250,253}
+\definecolor{codeframe}{RGB}{214,222,235}
+\definecolor{codetitle}{RGB}{33,55,96}
+\definecolor{keywordcolor}{RGB}{25,82,164}
+\definecolor{commentcolor}{RGB}{75,132,91}
+\definecolor{stringcolor}{RGB}{169,71,71}
+\definecolor{numbercolor}{RGB}{122,133,150}
+\definecolor{typecolor}{RGB}{122,64,150}
+\definecolor{termgreen}{RGB}{40,180,40}
+\definecolor{termbg}{RGB}{25,25,28}
+\definecolor{accentgold}{RGB}{140,40,40}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=aublue,
+    urlcolor=aublue
+}
+
+\captionsetup{font=small, labelfont={bf,color=aublue}, textfont=it, labelsep=period}
+
+\lstdefinestyle{cstyle}{
+    language=C,
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{keywordcolor}\bfseries,
+    commentstyle=\color{commentcolor}\itshape,
+    stringstyle=\color{stringcolor},
+    numberstyle=\scriptsize\color{numbercolor},
+    emph={uint8_t,size_t,SingleLevelPT,TwoLevelPT,HashedPT,InnerTableEntry,HashEntry},
+    emphstyle=\color{typecolor}\bfseries,
+    numbers=left,
+    numbersep=12pt,
+    stepnumber=1,
+    tabsize=4,
+    showspaces=false,
+    showstringspaces=false,
+    breaklines=true,
+    breakatwhitespace=true,
+    columns=fullflexible,
+    keepspaces=true,
+    frame=none,
+    xleftmargin=18pt,
+    aboveskip=2pt,
+    belowskip=2pt
+}
+
+\lstdefinestyle{terminal}{
+    basicstyle=\ttfamily\scriptsize\color{termgreen},
+    backgroundcolor=\color{termbg},
+    frame=none,
+    numbers=none,
+    showstringspaces=false,
+    breaklines=true,
+    xleftmargin=10pt,
+    xrightmargin=10pt,
+    aboveskip=0pt,
+    belowskip=0pt
+}
+
+\newtcolorbox{codebox}[1][]{
+    enhanced,
+    breakable,
+    colback=codebg,
+    colframe=codeframe,
+    arc=3pt,
+    outer arc=3pt,
+    boxrule=0.6pt,
+    borderline west={3pt}{0pt}{aublue},
+    left=7pt,
+    right=7pt,
+    top=8pt,
+    bottom=7pt,
+    fonttitle=\bfseries\small\color{white},
+    title={#1},
+    attach boxed title to top left={yshift=-2.5mm, xshift=7pt},
+    boxed title style={
+        colback=codetitle,
+        colframe=codetitle,
+        arc=2pt,
+        outer arc=2pt,
+        boxrule=0pt,
+        left=8pt,
+        right=8pt,
+        top=2pt,
+        bottom=2pt
+    }
+}
+
+\newtcolorbox{termbox}[1][Output]{
+    enhanced,
+    breakable,
+    colback=termbg,
+    colframe=termbg,
+    arc=0pt,
+    outer arc=0pt,
+    boxrule=0pt,
+    borderline west={3pt}{0pt}{termgreen},
+    left=5pt,
+    right=5pt,
+    top=5pt,
+    bottom=5pt,
+    fonttitle=\bfseries\small\color{white},
+    title={#1},
+    attach boxed title to top left={yshift=-2mm, xshift=0pt},
+    boxed title style={
+        colback=black!85,
+        colframe=black!85,
+        arc=0pt,
+        outer arc=0pt,
+        boxrule=0pt,
+        borderline west={3pt}{0pt}{termgreen},
+        left=6pt,
+        right=6pt,
+        top=2pt,
+        bottom=2pt
+    }
+}
+
+\newcommand{\sectionruleline}{%
+    \vspace{-0.4em}%
+    \noindent{\color{aublue!40}\rule{\linewidth}{1.2pt}}%
+    \par\vspace{-1.05em}%
+    \noindent{\color{accentgold}\rule{0.25\linewidth}{1.2pt}}%
+}
+
+\titleformat{\section}
+    {\color{aublue}\Large\bfseries\sffamily}
+    {\thesection.}
+    {0.5em}{}
+    [\sectionruleline]
+
+\titleformat{\subsection}
+    {\color{aublue!85}\large\bfseries\sffamily}
+    {\thesubsection}
+    {0.5em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{gray}CS325 Assignment 2 --- Paging}
+\fancyhead[R]{\small\color{gray}241110, 242353}
+\fancyfoot[C]{\small\color{gray}\thepage}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+
+\thispagestyle{empty}
+
+\begin{tikzpicture}[remember picture, overlay]
+    \fill[gray!2] (current page.south west) rectangle (current page.north east);
+    \fill[lightgray!50] (current page.south west) -- (current page.east) -- (current page.north east) -- cycle;
+    \fill[aublue!5] (current page.south) -- (current page.north east) -- (current page.north west) -- cycle;
+    \fill[aublue] (current page.north west) rectangle ++(25cm, -4cm);
+    \fill[accentgold] (current page.north west) ++(0,-4cm) rectangle ++(25cm, -0.3cm);
+    \fill[accentgold] (current page.south west) rectangle ++(25cm, 2.8cm);
+    \fill[aublue] (current page.south west) ++(0,2.8cm) rectangle ++(25cm, 0.4cm);
+    \node[anchor=west, text=white, font=\Large\bfseries\sffamily] at ([xshift=2cm, yshift=-2cm]current page.north west) {CS325 --- Operating Systems};
+    \node[anchor=east, text=white, font=\large\bfseries\sffamily] at ([xshift=-2cm, yshift=-2cm]current page.north east) {Assignment No.\ 2};
+    \node[anchor=center, text=white, font=\large\bfseries\sffamily] at ([yshift=1.25cm]current page.south) {Air University};
+\end{tikzpicture}
+
+\vspace*{4.6cm}
+
+\begin{center}
+    \IfFileExists{aulogo.png}{\includegraphics[width=3cm]{aulogo.png}\\[0.8cm]}{}
+    {\color{aublue}\fontsize{32}{40}\selectfont\bfseries Paging and Page Tables}\\[0.4cm]
+    {\color{black!85}\fontsize{20}{26}\selectfont\bfseries Single-Level, Two-Level, and Hashed Page Tables}\\[1.2cm]
+
+    \begin{tabular}{>{\bfseries}r l}
+        Course: & CS325 --- Operating Systems \\
+        Instructor: & Dr. Mohammad Imran \\
+        CLO: & CLO 2 \\
+        Reg. IDs: & 241110, 242353 \\
+        Language: & C \\
+    \end{tabular}
+\end{center}
+
+\newpage
+\tableofcontents
+\newpage
+
+\section{Objective}
+The objective of this assignment is to demonstrate the concept of paging in operating systems.
+The program simulates logical address translation using three page table schemes:
+
+\begin{itemize}[leftmargin=1.2cm]
+    \item Single-level page table
+    \item Two-level page table
+    \item Hashed page table
+\end{itemize}
+
+The address size is assumed to be 8 bits. Each logical address is translated into a physical address, and then the program accesses data from simulated physical memory.
+
+\section{Address Format}
+The logical address size is:
+
+\[
+m = 8 \text{ bits}
+\]
+
+The offset size is:
+
+\[
+d = 3 \text{ bits}
+\]
+
+Therefore, the page size is:
+
+\[
+2^d = 2^3 = 8 \text{ bytes}
+\]
+
+For the single-level and hashed page tables, the remaining 5 most significant bits represent the page number:
+
+\[
+p = 8 - 3 = 5 \text{ bits}
+\]
+
+\[
+\text{Logical Address} = [\text{Page Number: 5 bits}][\text{Offset: 3 bits}]
+\]
+
+For the two-level page table, the page number is divided into two parts:
+
+\[
+p_1 = 2 \text{ bits}, \quad p_2 = 3 \text{ bits}
+\]
+
+\[
+\text{Logical Address} = [p_1: 2 \text{ bits}][p_2: 3 \text{ bits}][d: 3 \text{ bits}]
+\]
+
+\section{Memory Simulation}
+Physical memory is simulated as a byte array. The program uses 8 frames, and each frame contains 8 bytes.
+
+\[
+\text{Physical Memory Size} = 8 \times 8 = 64 \text{ bytes}
+\]
+
+After translation, the physical address is calculated using:
+
+\[
+\text{Physical Address} = (\text{Frame Number} \times \text{Page Size}) + \text{Offset}
+\]
+
+\section{Page Table Implementations}
+\subsection{Single-Level Page Table}
+The single-level page table is implemented as a simple array. The virtual page number is used directly as the index, and the value stored at that index is the frame number.
+
+\begin{codebox}[Single-level address translation]
+\begin{lstlisting}[style=cstyle]
+page = logical_address >> 3
+offset = logical_address & 7
+frame = page_table[page]
+physical_address = frame * 8 + offset
+\end{lstlisting}
+\end{codebox}
+
+\subsection{Two-Level Page Table}
+The two-level page table divides the page number into two parts. The first part selects the outer table, and the second part selects the entry inside the inner table.
+
+\begin{codebox}[Two-level address translation]
+\begin{lstlisting}[style=cstyle]
+p1 = (logical_address >> 6) & 3
+p2 = (logical_address >> 3) & 7
+offset = logical_address & 7
+frame = outer_table[p1][p2]
+physical_address = frame * 8 + offset
+\end{lstlisting}
+\end{codebox}
+
+In the implementation, the inner table is allocated only when it is needed. This shows the main idea of hierarchical paging: not every second-level table has to exist at the start.
+
+\subsection{Hashed Page Table}
+The hashed page table uses a simple hash function:
+
+\[
+\text{bucket} = \text{page number} \bmod 16
+\]
+
+The assignment allows assuming no collisions, so each used bucket stores one page number and its mapped frame number.
+
+\begin{codebox}[Hashed page table lookup]
+\begin{lstlisting}[style=cstyle]
+page = logical_address >> 3
+bucket = page % HASH_BUCKETS
+frame = hash_table[bucket].frame
+physical_address = frame * 8 + offset
+\end{lstlisting}
+\end{codebox}
+
+\section{Program Demonstration}
+The \texttt{main()} function demonstrates memory access in three steps:
+
+\begin{enumerate}[leftmargin=1.2cm]
+    \item Generate or select a logical address.
+    \item Translate the logical address into a physical address using the selected page table.
+    \item Access the data stored at that physical address.
+\end{enumerate}
+
+The following examples are used:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|>{\bfseries}l|c|c|c|c|}
+\hline
+Scheme & Logical Address & Page / Index & Offset & Frame \\
+\hline
+Single-level & 173 / 0xAD & Page 21 & 5 & 3 \\
+Two-level & 157 / 0x9D & $p_1=2$, $p_2=3$ & 5 & 5 \\
+Hashed & 26 / 0x1A & Page 3 & 2 & 1 \\
+\hline
+\end{tabular}
+\caption{Logical addresses used for demonstration.}
+\end{table}
+
+\section{Compilation and Output}
+The program can be compiled using GCC:
+
+\begin{termbox}[Compile Command]
+\begin{lstlisting}[style=terminal]
+gcc main.c page_tables.c -Wall -Wextra -std=c11 -o paging_demo.exe
+\end{lstlisting}
+\end{termbox}
+
+The output of the program is shown below:
+
+\newpage
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{real_terminal_output.png}
+    \caption{Program output after compiling and running the paging demonstration.}
+\end{figure}
+
+\section{Source Code}
+The complete source code is divided into three files: \texttt{main.c}, \texttt{page\_tables.h}, and \texttt{page\_tables.c}.
+
+\subsection{\texttt{main.c}}
+\begin{codebox}[main.c]
+\lstinputlisting[style=cstyle]{main.c}
+\end{codebox}
+
+\subsection{\texttt{page\_tables.h}}
+\begin{codebox}[page\_tables.h]
+\lstinputlisting[style=cstyle]{page_tables.h}
+\end{codebox}
+
+\subsection{\texttt{page\_tables.c}}
+\begin{codebox}[page\_tables.c]
+\lstinputlisting[style=cstyle]{page_tables.c}
+\end{codebox}
+
+\section{Conclusion}
+This assignment shows how paging translates logical addresses into physical addresses. The single-level page table uses direct indexing, the two-level page table divides the page number into two indexes, and the hashed page table uses a hash bucket for lookup. In all three cases, the final physical address is formed by combining the mapped frame number with the offset.
+
+\section{Submission Files}
+Only the following source files should be placed inside the final submission folder:
+
+\begin{itemize}[leftmargin=1.2cm]
+    \item \texttt{main.c}
+    \item \texttt{page\_tables.c}
+    \item \texttt{page\_tables.h}
+\end{itemize}
+
+The folder and ZIP file should be named using the required format:
+
+\begin{center}
+\texttt{REGID1\_REGID2.zip}
+\end{center}
+
+\end{document}
