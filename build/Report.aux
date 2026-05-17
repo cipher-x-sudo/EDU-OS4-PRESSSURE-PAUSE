@@ -1,0 +1,52 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\providecommand\tcolorbox@label[2]{}
+\pgfsyspdfmark {pgfid1}{5891346}{49858272}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{3}{section.1}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Environment}{3}{section.2}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Kernel Build and Boot}{3}{section.3}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Host Preparation}{3}{subsection.3.1}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Installing kernel build and benchmark packages; all packages were already present on the host.\relax }}{4}{figure.caption.1}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Source Tree}{4}{subsection.3.2}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Cloning the stable tree and checking out tag v6.8.12 (\texttt  {HEAD} at commit for Linux 6.8.12).\relax }}{5}{figure.caption.2}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Kernel Configuration}{5}{subsection.3.3}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \texttt  {make defconfig} based on \texttt  {x86\_64\_defconfig}; configuration written to \texttt  {.config} and copied to \texttt  {kernel/configs/}.\relax }}{6}{figure.caption.3}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Compilation}{6}{subsection.3.4}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Successful build: \texttt  {arch/x86/boot/bzImage} is ready for installation.\relax }}{7}{figure.caption.4}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Installation}{7}{subsection.3.5}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces \texttt  {modules\_install} and \texttt  {install} placing \texttt  {vmlinuz-6.8.12-baseline} and modules under \texttt  {/lib/modules/6.8.12-baseline/}.\relax }}{8}{figure.caption.5}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}Bootloader Update}{8}{subsection.3.6}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces \texttt  {update-grub} detected \texttt  {/boot/vmlinuz-6.8.12-baseline} alongside Ubuntu \texttt  {6.8.0-117-generic} and \texttt  {6.8.0-40-generic}.\relax }}{9}{figure.caption.6}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7}Boot Verification}{9}{subsection.3.7}}
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces GRUB menu showing \texttt  {Ubuntu, with Linux 6.8.12-baseline} selected, with recovery and fallback Ubuntu kernel entries still available.\relax }}{10}{figure.caption.7}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Component Identification}{10}{section.4}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Selected Component}{10}{subsection.4.1}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Call Graph: Allocation to Reclaim}{11}{subsection.4.2}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Key Code Excerpts}{11}{subsection.4.3}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Watermarks}{12}{subsection.4.4}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}kswapd vs.\ Direct Reclaim}{12}{subsection.4.5}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Comparison of foreground direct reclaim and background \texttt  {kswapd}.\relax }}{13}{table.caption.8}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6}Pressure Stall Information (PSI)}{13}{subsection.4.6}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7}Hook Justification}{13}{subsection.4.7}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Design and Alternative Methodologies}{13}{section.5}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Alternative methodologies considered for coordinating reclaim under thrash.\relax }}{14}{table.caption.9}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Implementation}{14}{section.6}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Correctness and Safety}{14}{section.7}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}Evaluation}{14}{section.8}}
+\@writefile{toc}{\contentsline {section}{\numberline {9}Conclusion}{14}{section.9}}

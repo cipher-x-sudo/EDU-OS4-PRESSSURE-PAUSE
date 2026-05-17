@@ -19,7 +19,7 @@
 \usepackage{microtype}
 \usepackage{caption}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta}
+\usetikzlibrary{arrows.meta,positioning}
 \usepackage{amsmath}
 
 \tcbuselibrary{listings, skins, breakable}
@@ -271,7 +271,7 @@ git describe --always > ../../docs/kernel-tag.txt
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=\linewidth]{phase1-clone-v6.8.12.png}
+    \includegraphics[width=\linewidth]{{phase1-clone-v6.8.12}.png}
     \caption{Cloning the stable tree and checking out tag v6.8.12 (\texttt{HEAD} at commit for Linux 6.8.12).}
 \end{figure}
 
@@ -345,7 +345,15 @@ ls /boot/vmlinuz*
 
 \subsection{Boot Verification}
 
-\textbf{Pending:} Screenshots of the GRUB menu (Advanced options $\rightarrow$ \texttt{6.8.12-baseline}) and \texttt{uname -r} output confirming \texttt{6.8.12-baseline} after reboot are not yet included. Boot verification should be completed before the final submission; the fallback Ubuntu entry remains available if the custom kernel fails.
+The GRUB boot menu now lists the custom baseline kernel as the first selectable entry, while the stock Ubuntu kernels remain available as fallback options.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{phase1-grub-menu.png}
+    \caption{GRUB menu showing \texttt{Ubuntu, with Linux 6.8.12-baseline} selected, with recovery and fallback Ubuntu kernel entries still available.}
+\end{figure}
+
+\textbf{Pending:} \texttt{uname -r} output confirming \texttt{6.8.12-baseline} after reboot is not yet included. Boot verification should be completed before the final submission; the fallback Ubuntu entry remains available if the custom kernel fails.
 
 \section{Component Identification}
 
