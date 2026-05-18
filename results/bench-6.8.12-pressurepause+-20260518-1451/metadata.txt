@@ -1,0 +1,5 @@
+run_type=after
+kernel_role=patched
+kernel=6.8.12-pressurepause+
+2026-05-18T14:51:49-04:00
+Linux huzaifa 6.8.12-pressurepause+ #7 SMP PREEMPT_DYNAMIC Mon May 18 14:07:55 EDT 2026 x86_64 x86_64 x86_64 GNU/Linux

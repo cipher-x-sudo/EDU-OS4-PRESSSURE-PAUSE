@@ -1,0 +1,5 @@
+run_type=before
+kernel_role=baseline
+kernel=6.8.12-baseline
+2026-05-18T14:44:25-04:00
+Linux huzaifa 6.8.12-baseline #5 SMP PREEMPT_DYNAMIC Sun May 17 17:26:58 EDT 2026 x86_64 x86_64 x86_64 GNU/Linux
