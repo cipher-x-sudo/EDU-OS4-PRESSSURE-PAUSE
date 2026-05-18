@@ -353,7 +353,7 @@ The GRUB boot menu now lists the custom baseline kernel as the first selectable 
     \caption{GRUB menu showing \texttt{Ubuntu, with Linux 6.8.12-baseline} selected, with recovery and fallback Ubuntu kernel entries still available.}
 \end{figure}
 
-\textbf{Pending:} \texttt{uname -r} output confirming \texttt{6.8.12-baseline} after reboot is not yet included. Boot verification should be completed before the final submission; the fallback Ubuntu entry remains available if the custom kernel fails.
+Baseline install verified: \texttt{/boot/vmlinuz-6.8.12-baseline}, \texttt{/lib/modules/6.8.12-baseline/}, and GRUB entry present (see GRUB screenshot above). Select \textbf{Advanced options for Ubuntu} $\rightarrow$ \textbf{6.8.12-baseline} and confirm \texttt{uname -r} shows \texttt{6.8.12-baseline} before Phase~4 benchmarks.
 
 \section{Component Identification}
 
@@ -520,15 +520,53 @@ C. User-space only (swappiness, cgroups) & No kernel patch risk & Does not satis
 \caption{Alternative methodologies considered for coordinating reclaim under thrash.}
 \end{table}
 
-Detailed BEFORE/AFTER flow diagrams and constant definitions (\texttt{PSI\_FULL\_THRESHOLD}, \texttt{PRESSURE\_PAUSE\_MAX\_MS}) will be completed with the Phase~3 patch.
+Constants implemented in \texttt{mm/vmscan.c}: \texttt{PSI\_FULL\_THRESHOLD\_PCT=25}, \texttt{PRESSURE\_PAUSE\_MAX\_MS=20}.
 
 \section{Implementation}
 
-\textit{To be completed after applying the PressurePause patch to \texttt{mm/vmscan.c}, building \texttt{LOCALVERSION=-pressurepause}, and capturing \texttt{git format-patch} output in \texttt{kernel/patches/}.}
+The patch is exported as \texttt{kernel/patches/0001-pressurepause.patch} on branch \texttt{pressurepause} in \texttt{kernel/linux}. Config with \texttt{CONFIG\_PSI=y} and \texttt{CONFIG\_LOCALVERSION="-pressurepause"} is saved as \texttt{kernel/configs/config-6.8.12-pressurepause}.
+
+\subsection{Files changed}
+
+\begin{itemize}[leftmargin=1.2cm]
+    \item \texttt{include/linux/psi.h} --- declare \texttt{psi\_mem\_full\_avg10()}
+    \item \texttt{kernel/sched/psi.c} --- read system memory PSI \texttt{full} avg10 (same locking path as \texttt{psi\_show()})
+    \item \texttt{mm/vmscan.c} --- \texttt{pressure\_pause\_maybe()} at \texttt{do\_try\_to\_free\_pages()} entry (before \texttt{shrink\_zones} loop)
+\end{itemize}
+
+\subsection{Control flow}
+
+When direct reclaim enters \texttt{do\_try\_to\_free\_pages()}:
+\begin{enumerate}[leftmargin=1.2cm]
+    \item If cgroup reclaim, or PSI \texttt{full} avg10 $<$ 25\%, or no reclaimable pages, or watermarks already OK $\rightarrow$ stock path.
+    \item Else wake \texttt{kswapd} for each zone in the zonelist via \texttt{wakeup\_kswapd()}.
+    \item Bounded wait (max 20\,ms): exit early if watermarks improve or on fatal signal; always continue to \texttt{shrink\_zones()}.
+\end{enumerate}
+
+\subsection{Build and install}
+
+\begin{codebox}[Build patched kernel]
+\begin{lstlisting}[style=bashstyle]
+cd kernel/linux
+git checkout pressurepause
+scripts/config --enable PSI
+scripts/config --set-str LOCALVERSION "-pressurepause"
+make olddefconfig && make -j2
+./scripts/install-pressurepause-kernel.sh   # or: sudo make modules_install install && sudo update-grub
+\end{lstlisting}
+\end{codebox}
+
+\textbf{Boot verification:} GRUB $\rightarrow$ Advanced options $\rightarrow$ \texttt{6.8.12-pressurepause} (or \texttt{6.8.12-pressurepause+} if built from a dirty tree). Confirm \texttt{uname -r}, \texttt{cat /proc/pressure/memory}, and a short \texttt{stress-ng} run.
 
 \section{Correctness and Safety}
 
-\textit{To be completed. Planned invariants: bounded wait; never skip reclaim entirely; fall through on timeout or no reclaimable pages; GRUB fallback to Ubuntu kernel if the patched build panics.}
+\begin{enumerate}[leftmargin=1.2cm]
+    \item \textbf{Bounded wait:} \texttt{PRESSURE\_PAUSE\_MAX\_MS} caps the coordination loop; uses \texttt{schedule\_timeout\_idle(1)} slices.
+    \item \textbf{Never skip reclaim:} \texttt{pressure\_pause\_maybe()} always returns; stock \texttt{shrink\_zones()} priority loop runs afterward.
+    \item \textbf{kswapd cooperation:} \texttt{wakeup\_kswapd()} is additive; foreground reclaim still proceeds.
+    \item \textbf{Livelock guard:} skip pause if \texttt{zone\_reclaimable\_pages()} is zero for all zones in the zonelist.
+    \item \textbf{Fallback:} Ubuntu \texttt{6.8.0-117-generic} and \texttt{6.8.12-baseline} remain in GRUB if the patched kernel panics.
+\end{enumerate}
 
 \section{Evaluation}
 
@@ -536,6 +574,6 @@ Detailed BEFORE/AFTER flow diagrams and constant definitions (\texttt{PSI\_FULL\
 
 \section{Conclusion}
 
-The baseline Linux~v6.8.12 kernel was built and installed with \texttt{LOCALVERSION=-baseline}. The reclaim component was identified on the direct allocation path from \texttt{page\_alloc.c} through \texttt{try\_to\_free\_pages} and \texttt{do\_try\_to\_free\_pages} in \texttt{vmscan.c}, with PSI providing the system-wide stall signal for the planned modification. Remaining work includes boot verification screenshots, patch implementation, patched-kernel benchmarks, and final results discussion.
+The baseline Linux~v6.8.12 kernel was built and installed with \texttt{LOCALVERSION=-baseline}. The PressurePause patch was implemented on branch \texttt{pressurepause}, built as \texttt{6.8.12-pressurepause}, and exported to \texttt{kernel/patches/0001-pressurepause.patch}. Remaining work: install/reboot verification on the patched kernel, Phase~4 benchmarks (baseline vs.\ pressurepause), and final results discussion.
 
 \end{document}

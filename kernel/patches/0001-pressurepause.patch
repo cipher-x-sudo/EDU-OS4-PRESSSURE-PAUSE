@@ -1,0 +1,193 @@
+From 0910e8f4f37ee6aae20be3d584a385c40caa32ea Mon Sep 17 00:00:00 2001
+From: huziaf <huzaifaphantompak@gmail.com>
+Date: Mon, 18 May 2026 14:07:34 -0400
+Subject: [PATCH] mm: PressurePause PSI-gated bounded direct reclaim
+ coordination
+
+Add psi_mem_full_avg10() to read system memory PSI full avg10, and
+pressure_pause_maybe() at do_try_to_free_pages() entry to wake kswapd
+and wait up to PRESSURE_PAUSE_MAX_MS when PSI full exceeds threshold,
+then fall through to stock shrink_zones() reclaim.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ include/linux/psi.h |  3 ++
+ kernel/sched/psi.c  | 20 ++++++++++
+ mm/vmscan.c         | 95 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 118 insertions(+)
+
+diff --git a/include/linux/psi.h b/include/linux/psi.h
+index e0745873e..ca0094e8b 100644
+--- a/include/linux/psi.h
++++ b/include/linux/psi.h
+@@ -22,6 +22,8 @@ void psi_init(void);
+ void psi_memstall_enter(unsigned long *flags);
+ void psi_memstall_leave(unsigned long *flags);
+ 
++unsigned long psi_mem_full_avg10(void);
++
+ int psi_show(struct seq_file *s, struct psi_group *group, enum psi_res res);
+ struct psi_trigger *psi_trigger_create(struct psi_group *group, char *buf,
+ 				       enum psi_res res, struct file *file,
+@@ -49,6 +51,7 @@ static inline void psi_init(void) {}
+ 
+ static inline void psi_memstall_enter(unsigned long *flags) {}
+ static inline void psi_memstall_leave(unsigned long *flags) {}
++static inline unsigned long psi_mem_full_avg10(void) { return 0; }
+ 
+ #ifdef CONFIG_CGROUPS
+ static inline int psi_cgroup_alloc(struct cgroup *cgrp)
+diff --git a/kernel/sched/psi.c b/kernel/sched/psi.c
+index 7b4aa5809..4cf799f68 100644
+--- a/kernel/sched/psi.c
++++ b/kernel/sched/psi.c
+@@ -1222,6 +1222,26 @@ void psi_cgroup_restart(struct psi_group *group)
+ }
+ #endif /* CONFIG_CGROUPS */
+ 
++unsigned long psi_mem_full_avg10(void)
++{
++	unsigned long avg;
++	u64 now;
++
++	if (static_branch_likely(&psi_disabled))
++		return 0;
++
++	mutex_lock(&psi_system.avgs_lock);
++	now = sched_clock();
++	collect_percpu_times(&psi_system, PSI_AVGS, NULL);
++	if (now >= psi_system.avg_next_update)
++		psi_system.avg_next_update = update_averages(&psi_system, now);
++	avg = psi_system.avg[PSI_MEM_FULL][0];
++	mutex_unlock(&psi_system.avgs_lock);
++
++	return avg;
++}
++EXPORT_SYMBOL_GPL(psi_mem_full_avg10);
++
+ int psi_show(struct seq_file *m, struct psi_group *group, enum psi_res res)
+ {
+ 	bool only_full = false;
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 4255619a1..679e08abe 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -63,6 +63,7 @@
+ #include <linux/swapops.h>
+ #include <linux/balloon_compaction.h>
+ #include <linux/sched/sysctl.h>
++#include <linux/sched/loadavg.h>
+ 
+ #include "internal.h"
+ #include "swap.h"
+@@ -6169,6 +6170,98 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
+ 	target_lruvec->refaults[WORKINGSET_FILE] = refaults;
+ }
+ 
++#ifdef CONFIG_PSI
++#define PSI_FULL_THRESHOLD_PCT	25
++#define PRESSURE_PAUSE_MAX_MS	20
++
++static bool pressure_pause_zones_ok(struct zonelist *zonelist,
++				    struct scan_control *sc)
++{
++	struct zoneref *z;
++	struct zone *zone;
++
++	for_each_zone_zonelist_nodemask(zone, z, zonelist, sc->reclaim_idx,
++					sc->nodemask) {
++		if (!managed_zone(zone))
++			continue;
++		if (zone_watermark_ok(zone, sc->order, min_wmark_pages(zone),
++				      sc->reclaim_idx, 0))
++			return true;
++	}
++	return false;
++}
++
++static bool pressure_pause_has_reclaimable(struct zonelist *zonelist,
++					   struct scan_control *sc)
++{
++	struct zoneref *z;
++	struct zone *zone;
++
++	for_each_zone_zonelist_nodemask(zone, z, zonelist, sc->reclaim_idx,
++					sc->nodemask) {
++		if (!managed_zone(zone))
++			continue;
++		if (zone_reclaimable_pages(zone))
++			return true;
++	}
++	return false;
++}
++
++static void pressure_pause_wake_kswapd(struct zonelist *zonelist,
++				       struct scan_control *sc)
++{
++	struct zoneref *z;
++	struct zone *zone;
++
++	for_each_zone_zonelist_nodemask(zone, z, zonelist, sc->reclaim_idx,
++					sc->nodemask) {
++		if (!managed_zone(zone))
++			continue;
++		wakeup_kswapd(zone, sc->gfp_mask, sc->order, sc->reclaim_idx);
++	}
++}
++
++/*
++ * PSI-gated bounded coordination before synchronous shrink_zones().
++ * Falls through to stock reclaim on timeout or lack of progress.
++ */
++static void pressure_pause_maybe(struct zonelist *zonelist,
++				 struct scan_control *sc)
++{
++	unsigned long psi_full;
++	unsigned long deadline;
++
++	if (cgroup_reclaim(sc))
++		return;
++
++	psi_full = psi_mem_full_avg10();
++	if (LOAD_INT(psi_full) < PSI_FULL_THRESHOLD_PCT)
++		return;
++
++	if (!pressure_pause_has_reclaimable(zonelist, sc))
++		return;
++
++	if (pressure_pause_zones_ok(zonelist, sc))
++		return;
++
++	pressure_pause_wake_kswapd(zonelist, sc);
++
++	deadline = jiffies + msecs_to_jiffies(PRESSURE_PAUSE_MAX_MS);
++	while (time_before(jiffies, deadline)) {
++		if (fatal_signal_pending(current))
++			break;
++		if (pressure_pause_zones_ok(zonelist, sc))
++			break;
++		schedule_timeout_idle(1);
++	}
++}
++#else
++static void pressure_pause_maybe(struct zonelist *zonelist,
++				 struct scan_control *sc)
++{
++}
++#endif
++
+ /*
+  * This is the main entry point to direct page reclaim.
+  *
+@@ -6198,6 +6291,8 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
+ 	if (!cgroup_reclaim(sc))
+ 		__count_zid_vm_events(ALLOCSTALL, sc->reclaim_idx, 1);
+ 
++	pressure_pause_maybe(zonelist, sc);
++
+ 	do {
+ 		if (!sc->proactive)
+ 			vmpressure_prio(sc->gfp_mask, sc->target_mem_cgroup,
+-- 
+2.34.1
+
