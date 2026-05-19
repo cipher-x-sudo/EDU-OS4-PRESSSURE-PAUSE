@@ -11,7 +11,7 @@ Build and boot screenshots are in the project report ([Report.tex](../Report.tex
 | Course category | Page replacement / reclaim |
 | Primary files | `mm/page_alloc.c`, `mm/vmscan.c` |
 | PSI context | `kernel/sched/psi.c`, `include/linux/psi_types.h` |
-| Planned hook | `do_try_to_free_pages()` in `mm/vmscan.c`, line **6188**, before the `shrink_zones()` priority loop |
+| Implementation hook | `pressure_pause_maybe()` from `do_try_to_free_pages()` in `mm/vmscan.c`, line **~6397**, before the `shrink_zones()` priority loop |
 
 ## Problem
 
@@ -26,7 +26,8 @@ __alloc_pages_slowpath          mm/page_alloc.c ~4040
     → psi_memstall_enter
     → __perform_reclaim         mm/page_alloc.c ~3755
       → try_to_free_pages       mm/vmscan.c ~6406
-        → do_try_to_free_pages  mm/vmscan.c ~6188  ← HOOK
+        → do_try_to_free_pages  mm/vmscan.c ~6384
+          → pressure_pause_maybe  ~6397  ← HOOK
           → shrink_zones        mm/vmscan.c ~6065
             → shrink_node       mm/vmscan.c ~5881
               → LRU shrink / swap
@@ -49,16 +50,17 @@ nr_reclaimed = do_try_to_free_pages(zonelist, &sc);
 trace_mm_vmscan_direct_reclaim_end(nr_reclaimed);
 ```
 
-### Reclaim loop at hook site (`mm/vmscan.c`, lines 6188–6206)
+### Hook call site (`mm/vmscan.c`, lines ~6394–6404)
 
 ```c
-do {
-    sc->nr_scanned = 0;
-    shrink_zones(zonelist, sc);
-    if (sc->nr_reclaimed >= sc->nr_to_reclaim)
-        break;
-    ...
-} while (--sc->priority >= 0);
+	if (!cgroup_reclaim(sc))
+		__count_zid_vm_events(ALLOCSTALL, sc->reclaim_idx, 1);
+
+	pressure_pause_maybe(zonelist, sc);
+
+	do {
+		...
+		shrink_zones(zonelist, sc);
 ```
 
 ## Watermarks
@@ -80,7 +82,7 @@ do {
 - **Types:** `PSI_MEM_SOME`, `PSI_MEM_FULL` in `include/linux/psi_types.h`
 - **Accounting:** `kernel/sched/psi.c`
 - **Userspace:** `/proc/pressure/memory` — **`full`** indicates system-wide memory stall with no productive runners
-- **Note:** `psi_memstall_enter` in `__alloc_pages_direct_reclaim` marks the *current task* during reclaim; the patch will read *system* memory PSI averages to gate coordination
+- **Note:** `psi_memstall_enter` in `__alloc_pages_direct_reclaim` marks the *current task* during reclaim; the patch reads *system* `psi_mem_some_avg10()` at the hook to gate coordination
 
 ## Hook justification
 

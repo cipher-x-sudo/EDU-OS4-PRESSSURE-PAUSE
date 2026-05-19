@@ -227,9 +227,9 @@
 
 When physical memory is exhausted, allocating threads can enter \textbf{direct reclaim}: they block while the kernel evicts pages synchronously. Under coordinated memory thrash, many threads reclaim in parallel, evicting pages that are immediately refaulted. The working set exceeds available RAM, swap I/O rises, and tail latency degrades.
 
-\textbf{PressurePause} is a kernel modification that adds a bounded, PSI-aware coordination step on the direct reclaim path. When memory PSI \texttt{full} indicates a system-wide stall window, the patch will wake \texttt{kswapd} explicitly and apply a short, capped wait for background progress before falling through to normal direct reclaim. The design never disables reclaim permanently and always preserves stock behavior on timeout or when no reclaimable pages exist.
+\textbf{PressurePause} is a kernel modification that adds a bounded, PSI-aware coordination step on the direct reclaim path. When memory PSI \texttt{some} avg10 exceeds 0.01\% (basis-point compare against the same fixed-point values as \texttt{/proc/pressure/memory}), the patch wakes \texttt{kswapd} explicitly and applies a short, capped wait for background progress, then always runs the stock \texttt{shrink\_zones()} priority loop. The design never disables reclaim permanently and always preserves stock behavior on timeout or when guards fire.
 
-This report documents the development environment, baseline kernel build, and---in Section~4---identification of the target kernel component within Linux~v6.8.12. Later sections reserve space for design, implementation, evaluation, and conclusions as the patched kernel and benchmarks are completed.
+This report covers the development environment and baseline build (Sections~2--3), component identification (Section~4), design and patch implementation (Sections~5--6), correctness properties (Section~7), and evaluation evidence that the new code path runs (Section~8).
 
 \section{Environment}
 
@@ -237,7 +237,7 @@ This report documents the development environment, baseline kernel build, and---
     \item \textbf{Host:} Ubuntu 22.04 (Jammy), x86\_64
     \item \textbf{Fallback kernel:} \texttt{6.8.0-117-generic} (distribution build)
     \item \textbf{Custom baseline:} \texttt{6.8.12-baseline} (vanilla stable v6.8.12, unpatched)
-    \item \textbf{Source:} \texttt{kernel/linux} cloned from kernel.org stable tree, tag \texttt{v6.8.12} (recorded in \texttt{docs/kernel-tag.txt})
+    \item \textbf{Source:} vendored Linux v6.8.12 at \texttt{kernel/linux} (tag in \texttt{docs/kernel-tag.txt}); PressurePause changes are in-tree; export at \texttt{kernel/patches/0001-pressurepause.patch}
     \item \textbf{Configuration:} \texttt{make defconfig} (saved as \texttt{kernel/configs/config-6.8.12-baseline})
     \item \textbf{Build:} \texttt{make -j2 LOCALVERSION=-baseline}
     \item \textbf{Tools:} GCC toolchain, \texttt{dwarves}, \texttt{cscope}, \texttt{stress-ng}, \texttt{linux-tools-\$(uname -r)}
@@ -270,7 +270,7 @@ sudo apt install -y build-essential libncurses-dev bison flex libssl-dev \
 
 \subsection{Source Tree}
 
-The stable kernel was cloned shallowly on branch \texttt{v6.8}, then checked out at tag \texttt{v6.8.12}:
+The kernel tree is vendored in this project repository at \texttt{kernel/linux}; a fresh checkout is \texttt{git clone} of the project, not a nested submodule. During initial setup the stable tree was cloned shallowly on branch \texttt{v6.8}, then checked out at tag \texttt{v6.8.12}:
 
 \begin{termbox}[Clone and pin kernel tag]
 \begin{lstlisting}[style=terminal]
@@ -381,7 +381,7 @@ This section satisfies the course requirement to identify the selected kernel co
     \item \textbf{Course category:} Page replacement / reclaim (PressurePause extends direct reclaim coordination).
     \item \textbf{Primary files:} \texttt{mm/page\_alloc.c} (allocation slowpath), \texttt{mm/vmscan.c} (reclaim engine).
     \item \textbf{Supporting context:} \texttt{kernel/sched/psi.c}, \texttt{include/linux/psi\_types.h} (PSI accounting).
-    \item \textbf{Planned hook (Phase~3):} \texttt{do\_try\_to\_free\_pages()} in \texttt{mm/vmscan.c}, line~6188, immediately before the priority loop that calls \texttt{shrink\_zones()}.
+    \item \textbf{Implementation hook:} \texttt{pressure\_pause\_maybe()} called from \texttt{do\_try\_to\_free\_pages()} in \texttt{mm/vmscan.c}, line~6397, immediately before the priority loop that calls \texttt{shrink\_zones()}.
 \end{itemize}
 
 \subsection{Call Graph: Allocation to Reclaim}
@@ -393,9 +393,9 @@ When \texttt{get\_page\_from\_freelist()} cannot satisfy an allocation (zone fre
     \item \texttt{wake\_all\_kswapds} --- \texttt{mm/page\_alloc.c} $\sim$3814 (background reclaim hint)
     \item \texttt{\_\_alloc\_pages\_direct\_reclaim} --- \texttt{mm/page\_alloc.c} $\sim$3781
     \item \texttt{psi\_memstall\_enter} / \texttt{\_\_perform\_reclaim} --- \texttt{mm/page\_alloc.c} $\sim$3755--3790
-    \item \texttt{try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6406
-    \item \texttt{do\_try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6188 \textbf{[planned hook]}
-    \item \texttt{shrink\_zones} $\rightarrow$ \texttt{shrink\_node} --- \texttt{mm/vmscan.c} $\sim$6065 / $\sim$5881
+    \item \texttt{try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6625
+    \item \texttt{do\_try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6384; \texttt{pressure\_pause\_maybe()} at $\sim$6397
+    \item \texttt{shrink\_zones} $\rightarrow$ \texttt{shrink\_node} --- \texttt{mm/vmscan.c} (shared reclaim core)
 \end{enumerate}
 
 \begin{center}
@@ -408,12 +408,14 @@ When \texttt{get\_page\_from\_freelist()} cannot satisfy an allocation (zone fre
 \node (wake) [draw, rounded corners, fill=codebg, below=of slow] {wake\_kswapd};
 \node (direct) [draw, rounded corners, fill=codebg, below=of wake] {direct\_reclaim};
 \node (try) [draw, rounded corners, fill=codebg, below=of direct] {try\_to\_free\_pages};
-\node (hook) [draw, rounded corners, fill=accentgold!15, thick, below=of try] {do\_try\_to\_free\_pages\\\textbf{hook}};
+\node (dotfp) [draw, rounded corners, fill=codebg, below=of try] {do\_try\_to\_free\_pages};
+\node (hook) [draw, rounded corners, fill=accentgold!15, thick, below=of dotfp] {pressure\_pause\_maybe\\\textbf{hook}};
 \node (shrink) [draw, rounded corners, fill=codebg, below=of hook] {shrink\_zones $\rightarrow$ shrink\_node};
 \draw[arr] (slow) -- (wake);
 \draw[arr] (wake) -- (direct);
 \draw[arr] (direct) -- (try);
-\draw[arr] (try) -- (hook);
+\draw[arr] (try) -- (dotfp);
+\draw[arr] (dotfp) -- (hook);
 \draw[arr] (hook) -- (shrink);
 \end{tikzpicture}
 \end{center}
@@ -456,23 +458,18 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 \end{lstlisting}
 \end{codebox}
 
-\textbf{Reclaim loop and planned hook site} (\texttt{mm/vmscan.c}):
+\textbf{Hook call site} (\texttt{mm/vmscan.c}):
 
-\begin{codebox}[mm/vmscan.c: do\_try\_to\_free\_pages (lines 6188--6206)]
+\begin{codebox}[mm/vmscan.c: do\_try\_to\_free\_pages (lines 6394--6404)]
 \begin{lstlisting}[style=cstyle]
-static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
-                                          struct scan_control *sc)
-{
-    ...
-    do {
-        sc->nr_scanned = 0;
-        shrink_zones(zonelist, sc);   /* LRU eviction per zone */
-        if (sc->nr_reclaimed >= sc->nr_to_reclaim)
-            break;
-        ...
-    } while (--sc->priority >= 0);
-    ...
-}
+	if (!cgroup_reclaim(sc))
+		__count_zid_vm_events(ALLOCSTALL, sc->reclaim_idx, 1);
+
+	pressure_pause_maybe(zonelist, sc);
+
+	do {
+		...
+		shrink_zones(zonelist, sc);
 \end{lstlisting}
 \end{codebox}
 
@@ -502,7 +499,7 @@ PressurePause & Yes (hook at \texttt{do\_try\_to\_free\_pages}) & No (unless exp
 
 \subsection{Pressure Stall Information (PSI)}
 
-PSI accounts time tasks spend stalled on memory, I/O, or CPU. For PressurePause, the relevant signal is memory PSI \textbf{full}: periods when stalled tasks exist and no other tasks are making productive forward progress on memory.
+PSI accounts time tasks spend stalled on memory, I/O, or CPU. For PressurePause, the \textbf{gate} uses memory PSI \texttt{some} avg10 (tasks stalled on memory); \texttt{full} is also sampled for debug peaks.
 
 \begin{itemize}[leftmargin=1.2cm]
     \item \textbf{Types:} \texttt{PSI\_MEM\_SOME}, \texttt{PSI\_MEM\_FULL} in \texttt{include/linux/psi\_types.h}
@@ -510,17 +507,17 @@ PSI accounts time tasks spend stalled on memory, I/O, or CPU. For PressurePause,
     \item \textbf{Userspace:} \texttt{/proc/pressure/memory} (\texttt{some} vs.\ \texttt{full} averages)
 \end{itemize}
 
-\texttt{psi\_memstall\_enter()} in \texttt{\_\_alloc\_pages\_direct\_reclaim} marks the \emph{current allocating task} as memory-stalled during reclaim for PSI statistics. That is distinct from reading system-wide \texttt{full} averages, which the patch will use to decide whether to apply bounded coordination before \texttt{shrink\_zones()}.
+\texttt{psi\_memstall\_enter()} in \texttt{\_\_alloc\_pages\_direct\_reclaim} marks the \emph{current allocating task} as memory-stalled during reclaim for PSI statistics. That is distinct from \texttt{psi\_mem\_some\_avg10()}, which the patch reads at the hook to gate bounded coordination before \texttt{shrink\_zones()}.
 
 \subsection{Hook Justification}
 
 \texttt{shrink\_node()} is shared by both \texttt{kswapd} and direct reclaim. Hooking only at \texttt{do\_try\_to\_free\_pages()} limits changes to the allocating-thread path without affecting background reclaim unless explicitly intended. Hooking at \texttt{shrink\_node()} would require \texttt{!current\_is\_kswapd()} guards and a broader behavioral surface.
 
-Identification screenshots (editor views of \texttt{vmscan.c}, \texttt{grep} call chains, or \texttt{/proc/pressure/memory} under load) may be added in a future revision; this section relies on verified line numbers from the v6.8.12 tree.
+Build and boot screenshots for the baseline kernel appear in Section~3; line numbers above refer to the patched v6.8.12 tree in \texttt{kernel/linux}.
 
 \section{Design and Alternative Methodologies}
 
-\textbf{Chosen approach:} PSI-gated bounded backoff on direct reclaim entry---wake \texttt{kswapd}, wait up to \texttt{PRESSURE\_PAUSE\_MAX\_MS}, then fall through to stock reclaim on timeout or lack of progress.
+\textbf{Chosen approach:} PSI-gated bounded backoff on direct reclaim entry---gate on memory PSI \texttt{some} avg10, wake \texttt{kswapd}, wait up to \texttt{PRESSURE\_PAUSE\_MAX\_MS}, then fall through to stock reclaim on timeout or lack of progress.
 
 \begin{table}[H]
 \centering
@@ -540,47 +537,104 @@ Constants in \texttt{mm/vmscan.c}: \texttt{PSI\_MEM\_THRESHOLD\_BPS=1} (0.01\% s
 
 \section{Implementation}
 
-The patch is exported as \texttt{kernel/patches/0001-pressurepause.patch} on branch \texttt{pressurepause} in \texttt{kernel/linux}. Config with \texttt{CONFIG\_PSI=y} and \texttt{CONFIG\_LOCALVERSION="-pressurepause"} is saved as \texttt{kernel/configs/config-6.8.12-pressurepause}.
+PressurePause changes are applied in the vendored tree at \texttt{kernel/linux}. The same diff is exported as \texttt{kernel/patches/0001-pressurepause.patch}. Saved config: \texttt{kernel/configs/config-6.8.12-pressurepause} (\texttt{CONFIG\_PSI=y}, \texttt{LOCALVERSION="-pressurepause"}).
+
+\subsection{Stock path vs.\ patched path}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}p{5.5cm}p{5.5cm}@{}}
+\toprule
+\textbf{Before (stock v6.8.12)} & \textbf{After (PressurePause)} \\
+\midrule
+\texttt{do\_try\_to\_free\_pages} $\rightarrow$ \texttt{shrink\_zones} loop only & Same entry + \texttt{pressure\_pause\_maybe()} first \\
+No system-wide PSI read at reclaim hook & \texttt{psi\_mem\_some\_avg10()} / \texttt{psi\_mem\_full\_avg10()} \\
+No debugfs counters & \texttt{/sys/kernel/debug/pressure\_pause\_activations} \\
+\bottomrule
+\end{tabular}
+\caption{Direct-reclaim code path before and after the patch.}
+\end{table}
 
 \subsection{Files changed}
 
 \begin{itemize}[leftmargin=1.2cm]
-    \item \texttt{include/linux/psi.h} --- \texttt{psi\_mem\_full\_avg10()}, \texttt{psi\_mem\_some\_avg10()}
-    \item \texttt{kernel/sched/psi.c} --- read system memory PSI \texttt{some}/\texttt{full} avg10 (same locking path as \texttt{psi\_show()})
-    \item \texttt{mm/vmscan.c} --- \texttt{pressure\_pause\_maybe()} at \texttt{do\_try\_to\_free\_pages()} entry (before \texttt{shrink\_zones} loop)
+    \item \texttt{include/linux/psi.h} --- export \texttt{psi\_mem\_full\_avg10()}, \texttt{psi\_mem\_some\_avg10()} (and stubs when \texttt{CONFIG\_PSI} is off).
+    \item \texttt{kernel/sched/psi.c} --- implement both readers using the same locking path as \texttt{psi\_show()}.
+    \item \texttt{mm/vmscan.c} --- threshold helpers, \texttt{pressure\_pause\_maybe()}, zone/kswapd helpers, debugfs counters, hook call at line~6397.
 \end{itemize}
 
-\subsection{PSI threshold fix}
+\subsection{\texttt{pressure\_pause\_maybe()} control flow}
 
-The initial gate used \texttt{LOAD\_INT(psi\_full) >= 25}, which requires \textbf{25\%} memory \texttt{full} stall (the integer part of the fixed-point average matches the whole-number in \texttt{/proc/pressure/memory}, e.g.\ \texttt{avg10=25.00}). Benchmarks peaked near \texttt{full avg10=0.18} (0.18\%), so the patch never ran. The fix uses \texttt{psi\_mem\_avg10\_exceeds\_bps()} with \texttt{PSI\_MEM\_THRESHOLD\_BPS=1} (0.01\%) on memory PSI \texttt{some} avg10, which rises earlier than \texttt{full} under swap-heavy thrash. Debugfs reports \texttt{activations}, per-guard \texttt{skip\_*} counts, and \texttt{peak\_psi\_*} maxima seen at the hook.
-
-\subsection{Control flow}
-
-When direct reclaim enters \texttt{do\_try\_to\_free\_pages()}:
+On each \texttt{do\_try\_to\_free\_pages()} entry the hook increments \texttt{entered}, then:
 \begin{enumerate}[leftmargin=1.2cm]
-    \item If cgroup reclaim, or PSI \texttt{some} avg10 below 0.01\%, or no reclaimable pages, or no zone below min watermarks $\rightarrow$ stock path.
-    \item Else wake \texttt{kswapd} for each zone in the zonelist via \texttt{wakeup\_kswapd()}.
-    \item Bounded wait (max 20\,ms): exit early if watermarks improve or on fatal signal; always continue to \texttt{shrink\_zones()}.
+    \item \textbf{Cgroup reclaim} $\rightarrow$ increment \texttt{skip\_cgroup}, return (stock reclaim only).
+    \item Read \texttt{psi\_mem\_some\_avg10()} and \texttt{psi\_mem\_full\_avg10()}; update \texttt{peak\_psi\_*} maxima.
+    \item If \texttt{some} avg10 is below 0.01\% (\texttt{PSI\_MEM\_THRESHOLD\_BPS=1}) $\rightarrow$ \texttt{skip\_psi\_low}, return.
+    \item If no zone has reclaimable pages $\rightarrow$ \texttt{skip\_no\_reclaimable}, return.
+    \item If \emph{no} zone in the zonelist is below min watermarks $\rightarrow$ \texttt{skip\_zones\_ok}, return. (Stock logic incorrectly skipped when \emph{any} zone was OK; the fix requires at least one zone still under pressure.)
+    \item Wake \texttt{kswapd} per managed zone; increment \texttt{activations}; bounded wait up to \texttt{PRESSURE\_PAUSE\_MAX\_MS} (20\,ms), exiting early on fatal signal or if any zone reaches min watermarks.
+    \item Always fall through: the stock \texttt{shrink\_zones()} priority loop runs unchanged.
 \end{enumerate}
+
+\subsection{PSI threshold change}
+
+The first implementation used \texttt{LOAD\_INT(psi\_full) >= 25}, which requires \textbf{25\%} memory \texttt{full} stall (the integer part of the fixed-point average matches the whole number in \texttt{/proc/pressure/memory}, e.g.\ \texttt{avg10=25.00}). Benchmarks peaked near \texttt{full avg10=0.18} (0.18\%), so the gate never fired and \texttt{activations} stayed at zero.
+
+The fix compares the same fixed-point avg10 as \texttt{/proc} using basis points:
+
+\begin{codebox}[mm/vmscan.c: threshold compare (lines 6189--6191, 6332--6336)]
+\begin{lstlisting}[style=cstyle]
+static inline bool psi_mem_avg10_exceeds_bps(unsigned long avg, unsigned int bps)
+{
+	return avg >= psi_mem_threshold_fixed(bps);
+}
+...
+	if (!psi_mem_avg10_exceeds_bps(psi_some, PSI_MEM_THRESHOLD_BPS)) {
+		atomic64_inc(&pressure_pause_skip_psi);
+		return;
+	}
+\end{lstlisting}
+\end{codebox}
+
+The gate uses memory PSI \texttt{some} avg10, which rises earlier than \texttt{full} under swap-heavy thrash.
+
+\subsection{Debugfs interface}
+
+Mount debugfs if needed (\texttt{sudo mount -t debugfs none /sys/kernel/debug}), then read \texttt{/sys/kernel/debug/pressure\_pause\_activations}:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}p{4.2cm}p{8.3cm}@{}}
+\toprule
+\textbf{Field} & \textbf{Meaning} \\
+\midrule
+\texttt{activations} & Coordination ran (wake \texttt{kswapd} + bounded wait) \\
+\texttt{entered} & Hook invoked from \texttt{do\_try\_to\_free\_pages} \\
+\texttt{skip\_psi\_low} & \texttt{some} avg10 below 0.01\% threshold \\
+\texttt{skip\_zones\_ok} & No zone below min watermarks \\
+\texttt{skip\_no\_reclaimable} & No reclaimable pages in zonelist \\
+\texttt{skip\_cgroup} & Cgroup reclaim path \\
+\texttt{peak\_psi\_some\_avg10} & Max \texttt{some} avg10 seen at hook since boot \\
+\texttt{peak\_psi\_full\_avg10} & Max \texttt{full} avg10 seen at hook since boot \\
+\bottomrule
+\end{tabular}
+\caption{PressurePause debugfs counters (\texttt{mm/vmscan.c}).}
+\end{table}
 
 \subsection{Build and install}
 
 \begin{codebox}[Build patched kernel]
 \begin{lstlisting}[style=bashstyle]
 cd kernel/linux
-git checkout pressurepause
 scripts/config --enable PSI
 scripts/config --set-str LOCALVERSION "-pressurepause"
-make olddefconfig && make -j2
-./scripts/install-pressurepause-kernel.sh   # or: sudo make modules_install install && sudo update-grub
+make olddefconfig && make -j$(nproc)
+cd ../.. && ./scripts/install-pressurepause-kernel.sh
 \end{lstlisting}
 \end{codebox}
 
-\textbf{Boot verification:} GRUB $\rightarrow$ Advanced options $\rightarrow$ \texttt{6.8.12-pressurepause} (or \texttt{6.8.12-pressurepause+} if built from a dirty tree). Confirm \texttt{uname -r}, \texttt{cat /proc/pressure/memory}, and \texttt{./scripts/verify-activation.sh}. The patched kernel was booted successfully, memory PSI was available, repeated 120\,s \texttt{stress-ng} virtual-memory workloads completed without crash or hang, and the debugfs counter confirmed real PressurePause executions during benchmark runs.
-
-\subsection{Evaluation (benchmarks)}
-
-Comparative runs use \texttt{./bench-run.sh} on \texttt{6.8.12-baseline} (before) and \texttt{6.8.12-pressurepause+} (after), saving timestamped directories under \texttt{results/}. Metrics: \texttt{pgmajfault} delta, \texttt{vmstat} \texttt{si}/\texttt{so}, PSI samples during stress, and on the patched kernel \texttt{pressure-pause-debugfs-*.txt}. Final patched runs show \texttt{activations} increases of +40 on the 8-worker/93\% workload and +15 on one 4-worker/85\% workload, proving that the reclaim coordination path executed.
+\textbf{Boot verification:} GRUB $\rightarrow$ Advanced options $\rightarrow$ \texttt{6.8.12-pressurepause} (or \texttt{6.8.12-pressurepause+} when the parent repo has local edits). Confirm \texttt{uname -r}, \texttt{cat /proc/pressure/memory}, and \texttt{./scripts/verify-activation.sh}. The patched kernel booted successfully; repeated 120\,s \texttt{stress-ng} workloads completed without crash or hang, and debugfs \texttt{activations} increased during benchmark runs (Section~8).
 
 \section{Correctness and Safety}
 
@@ -594,9 +648,11 @@ Comparative runs use \texttt{./bench-run.sh} on \texttt{6.8.12-baseline} (before
 
 \section{Evaluation}
 
+This section records evidence that the PressurePause code path runs under load; the primary implementation narrative is in Section~6.
+
 \subsection{Methodology}
 
-Matched pairs on the same host used \texttt{./bench-run.sh} with \texttt{stress-ng --vm N --vm-bytes P\% --timeout 120s}, \texttt{vmstat}, \texttt{pgmajfault}, PSI samples, and debugfs PressurePause counters. Representative directories: 8 workers / 93\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135148} vs patched \texttt{bench-6.8.12-pressurepause+-20260519-155900}; 4 workers / 85\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135638} vs patched average of \texttt{160116}, \texttt{160400}, and \texttt{160617}.
+Matched pairs on the same host used \texttt{./bench-run.sh} with \texttt{stress-ng --vm N --vm-bytes P\% --timeout 120s}, \texttt{vmstat}, \texttt{pgmajfault}, PSI samples, and debugfs \texttt{pressure\_pause\_activations} snapshots (\texttt{pressure-pause-debugfs-*.txt}). Representative directories: 8 workers / 93\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135148} vs patched \texttt{bench-6.8.12-pressurepause+-20260519-155900}; 4 workers / 85\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135638} vs patched average of \texttt{160116}, \texttt{160400}, and \texttt{160617}.
 
 \begin{table}[H]
 \centering
@@ -620,7 +676,7 @@ Matched pairs on the same host used \texttt{./bench-run.sh} with \texttt{stress-
 
 \subsection{Discussion}
 
-After correcting the PSI gate (25\% \texttt{LOAD\_INT} bug $\rightarrow$ 0.01\% \texttt{some} avg10), PressurePause now both activates and improves the main swap-pressure metrics. On the 8\,vm / 93\% workload, the debugfs counter increased from 15 to 55 (+40 activations), average swap-out fell by 17.9\%, and residual swap fell by 31.7\%. On the 4\,vm / 85\% workload, the three-run patched average reduced average swap-out by 31.7\%, maximum swapped memory by 24.8\%, and residual swap by 71.5\%; run \texttt{160617} also confirmed +15 PressurePause activations. The tradeoff remains higher \texttt{pgmajfault} on patched runs, so the strongest claim is improved swap pressure with a documented page-fault cost.
+Kernels built with the original \texttt{LOAD\_INT(psi\_full) >= 25} gate could complete stress workloads with \textbf{zero} \texttt{activations} because observed \texttt{full} avg10 never reached 25\%. After the basis-point gate on \texttt{some} avg10 (Section~6.3), debugfs confirms the hook runs: on the 8\,vm / 93\% workload, \texttt{activations} rose from 15 to 55 (+40) during the run; on one 4\,vm / 85\% trial (\texttt{160617}), +15 activations. Matched baseline vs patched runs also show lower swap-out and residual swap on the patched kernel, with higher \texttt{pgmajfault} as a documented tradeoff (average swap-out $-$17.9\% on 8\,vm / 93\%, $-$31.7\% on the 4\,vm / 85\% patched average).
 
 \subsection{Limitations}
 
@@ -628,6 +684,6 @@ This is not a full statistical study. PSI samples are every 5\,s and can miss sh
 
 \section{Conclusion}
 
-The baseline Linux~v6.8.12 kernel and the PressurePause patch (\texttt{6.8.12-pressurepause+}) were built and compared under controlled \texttt{stress-ng} workloads. The final runs confirm that the patched reclaim path executes: PressurePause activated +40 times in the 8\,vm / 93\% workload and +15 times in one 4\,vm / 85\% workload. The modification is stable and reduces swap pressure in matched benchmarks, with average swap-out falling by 17.9\% on 8\,vm / 93\% and by 31.7\% on the 4\,vm / 85\% average. The remaining tradeoff is increased major page faults, so the project demonstrates PSI-gated, bounded direct-reclaim coordination with measurable swap benefits and a documented fault-count cost.
+PressurePause adds \texttt{pressure\_pause\_maybe()} on the direct-reclaim path: when memory PSI \texttt{some} avg10 exceeds 0.01\%, the allocating thread wakes \texttt{kswapd}, waits up to 20\,ms, then always proceeds with stock \texttt{shrink\_zones()}. Supporting changes export system PSI averages, fix the zone watermark guard, and expose debugfs counters for verification. Under \texttt{stress-ng}, the patched kernel is stable and debugfs shows real activations after the threshold fix; matched benchmarks report lower swap pressure at the cost of higher major page faults. The project delivers a small, PSI-gated reclaim coordination patch with observable behavior and measured tradeoffs.
 
 \end{document}
