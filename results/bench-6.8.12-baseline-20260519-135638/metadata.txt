@@ -1,0 +1,15 @@
+run_type=before
+kernel_role=baseline
+kernel=6.8.12-baseline
+date=2026-05-19T13:56:40-04:00
+host=huzaifa
+uname=Linux huzaifa 6.8.12-baseline #5 SMP PREEMPT_DYNAMIC Sun May 17 17:26:58 EDT 2026 x86_64 x86_64 x86_64 GNU/Linux
+stress_timeout_s=120
+vm_workers=4
+vm_bytes_pct=85
+vmstat_interval_s=1
+vmstat_duration_s=130
+vmstat_count=130
+collect_psi=yes
+psi_interval_s=5
+command=./bench-run.sh
