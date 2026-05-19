@@ -520,7 +520,7 @@ C. User-space only (swappiness, cgroups) & No kernel patch risk & Does not satis
 \caption{Alternative methodologies considered for coordinating reclaim under thrash.}
 \end{table}
 
-Constants implemented in \texttt{mm/vmscan.c}: \texttt{PSI\_FULL\_THRESHOLD\_PCT=25}, \texttt{PRESSURE\_PAUSE\_MAX\_MS=20}.
+Constants in \texttt{mm/vmscan.c}: \texttt{PSI\_MEM\_THRESHOLD\_BPS=10} (0.10\% stall, fixed-point compare), \texttt{PRESSURE\_PAUSE\_MAX\_MS=20}. Activation count: \texttt{/sys/kernel/debug/pressure\_pause\_activations}.
 
 \section{Implementation}
 
@@ -529,16 +529,20 @@ The patch is exported as \texttt{kernel/patches/0001-pressurepause.patch} on bra
 \subsection{Files changed}
 
 \begin{itemize}[leftmargin=1.2cm]
-    \item \texttt{include/linux/psi.h} --- declare \texttt{psi\_mem\_full\_avg10()}
-    \item \texttt{kernel/sched/psi.c} --- read system memory PSI \texttt{full} avg10 (same locking path as \texttt{psi\_show()})
+    \item \texttt{include/linux/psi.h} --- \texttt{psi\_mem\_full\_avg10()}, \texttt{psi\_mem\_some\_avg10()}
+    \item \texttt{kernel/sched/psi.c} --- read system memory PSI \texttt{some}/\texttt{full} avg10 (same locking path as \texttt{psi\_show()})
     \item \texttt{mm/vmscan.c} --- \texttt{pressure\_pause\_maybe()} at \texttt{do\_try\_to\_free\_pages()} entry (before \texttt{shrink\_zones} loop)
 \end{itemize}
+
+\subsection{PSI threshold fix}
+
+The initial gate used \texttt{LOAD\_INT(psi\_full) >= 25}, which requires \textbf{25\%} memory \texttt{full} stall (as shown in \texttt{/proc/pressure/memory}). Benchmarks peaked near \texttt{full avg10=0.14} (0.14\%), so the patch never ran. The fix compares the kernel fixed-point average to \texttt{FIXED\_1 * BPS / 10000} with \texttt{PSI\_MEM\_THRESHOLD\_BPS=10} (0.10\%), and triggers if either \texttt{some} or \texttt{full} avg10 exceeds that level.
 
 \subsection{Control flow}
 
 When direct reclaim enters \texttt{do\_try\_to\_free\_pages()}:
 \begin{enumerate}[leftmargin=1.2cm]
-    \item If cgroup reclaim, or PSI \texttt{full} avg10 $<$ 25\%, or no reclaimable pages, or watermarks already OK $\rightarrow$ stock path.
+    \item If cgroup reclaim, or both PSI \texttt{some} and \texttt{full} below 0.10\%, or no reclaimable pages, or watermarks already OK $\rightarrow$ stock path.
     \item Else wake \texttt{kswapd} for each zone in the zonelist via \texttt{wakeup\_kswapd()}.
     \item Bounded wait (max 20\,ms): exit early if watermarks improve or on fatal signal; always continue to \texttt{shrink\_zones()}.
 \end{enumerate}
@@ -556,7 +560,11 @@ make olddefconfig && make -j2
 \end{lstlisting}
 \end{codebox}
 
-\textbf{Boot verification:} The patched kernel was booted successfully as \texttt{6.8.12-pressurepause+}. The captured run confirms \texttt{/proc/pressure/memory} was available on the patched kernel, with memory PSI \texttt{full avg10=0.00} before and after the workload. The same patched boot also completed a 120\,s \texttt{stress-ng} virtual-memory run without a crash or hang.
+\textbf{Boot verification:} GRUB $\rightarrow$ Advanced options $\rightarrow$ \texttt{6.8.12-pressurepause} (or \texttt{6.8.12-pressurepause+} if built from a dirty tree). Confirm \texttt{uname -r}, \texttt{cat /proc/pressure/memory}, and \texttt{./scripts/verify-activation.sh} (counter at \texttt{/sys/kernel/debug/pressure\_pause\_activations} must increase under stress). The patched kernel was booted successfully; the captured run confirms memory PSI was available (\texttt{full avg10=0.00} before and after the workload), and a 120\,s \texttt{stress-ng} virtual-memory run completed without crash or hang.
+
+\subsection{Evaluation (benchmarks)}
+
+Comparative runs use \texttt{./bench-run.sh} on \texttt{6.8.12-baseline} (before) and \texttt{6.8.12-pressurepause+} (after), saving timestamped directories under \texttt{results/}. Metrics: \texttt{pgmajfault} delta, \texttt{vmstat} \texttt{si}/\texttt{so}, PSI samples during stress. Initial runs with the 25\% threshold showed no patch effect; after the basis-point fix, verify activation via debugfs before interpreting fault counts.
 
 \section{Correctness and Safety}
 

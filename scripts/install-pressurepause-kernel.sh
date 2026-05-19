@@ -15,3 +15,4 @@ sudo make modules_install install
 sudo update-grub
 echo "Done. Reboot and select Advanced options -> Linux $ver"
 ls -la /boot/vmlinuz*"${ver}"* 2>/dev/null || ls -la /boot/vmlinuz*pressurepause* 2>/dev/null
+echo "After reboot: ./scripts/verify-activation.sh  (debugfs counter must increase under stress)"
