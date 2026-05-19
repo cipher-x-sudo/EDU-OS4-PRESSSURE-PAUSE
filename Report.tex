@@ -556,7 +556,7 @@ make olddefconfig && make -j2
 \end{lstlisting}
 \end{codebox}
 
-\textbf{Boot verification:} GRUB $\rightarrow$ Advanced options $\rightarrow$ \texttt{6.8.12-pressurepause} (or \texttt{6.8.12-pressurepause+} if built from a dirty tree). Confirm \texttt{uname -r}, \texttt{cat /proc/pressure/memory}, and a short \texttt{stress-ng} run.
+\textbf{Boot verification:} The patched kernel was booted successfully as \texttt{6.8.12-pressurepause+}. The captured run confirms \texttt{/proc/pressure/memory} was available on the patched kernel, with memory PSI \texttt{full avg10=0.00} before and after the workload. The same patched boot also completed a 120\,s \texttt{stress-ng} virtual-memory run without a crash or hang.
 
 \section{Correctness and Safety}
 
@@ -570,10 +570,39 @@ make olddefconfig && make -j2
 
 \section{Evaluation}
 
-\textit{To be completed. Comparative benchmarks will run only on custom kernels: \texttt{6.8.12-baseline} (before) vs.\ \texttt{6.8.12-pressurepause} (after), using \texttt{stress-ng}, \texttt{vmstat}, \texttt{/proc/pressure/memory}, and \texttt{/proc/vmstat} (\texttt{pgmajfault}). Results will be stored under \texttt{results/}.}
+\subsection{Methodology}
+
+The comparison used the custom baseline kernel and the patched PressurePause kernel on the same host. The baseline result directory is \texttt{results/bench-6.8.12-baseline-20260518-1444}; the patched result directory is \texttt{results/bench-6.8.12-pressurepause+-20260518-1451}. Each run used \texttt{stress-ng --vm 4 --timeout 120s}. Metrics were captured with \texttt{stress-ng}, \texttt{vmstat}, \texttt{/proc/vmstat} (\texttt{pgmajfault}), \texttt{free}, and \texttt{/proc/pressure/memory}.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}p{5.2cm}p{3.8cm}p{3.8cm}@{}}
+\toprule
+\textbf{Metric} & \textbf{Baseline: \texttt{6.8.12-baseline}} & \textbf{Patched: \texttt{6.8.12-pressurepause+}} \\
+\midrule
+\texttt{stress-ng} completion time & 120.03\,s, successful & 120.03\,s, successful \\
+Major page fault increase & 44 & 142 \\
+Swap used after workload & 71\,MiB & 0.0\,KiB \\
+Average swap-out in \texttt{vmstat} & 5066.3\,KB/s & 12674.7\,KB/s \\
+Maximum swapped memory in \texttt{vmstat} & 751640\,KB & 585208\,KB \\
+Captured memory PSI & baseline capture reported ``no PSI'' & \texttt{full avg10=0.00} before/after \\
+\bottomrule
+\end{tabular}
+\caption{Comparative Phase~4 benchmark results for the baseline and PressurePause kernels.}
+\end{table}
+
+\subsection{Discussion}
+
+The patched kernel met the main functionality and stability goals for this phase: it booted, exposed \texttt{/proc/pressure/memory}, and completed the same 120\,s memory stress workload as the baseline without a crash or hang. However, the measured performance result is mixed rather than a clear improvement. The patched kernel ended with no swap in use and a lower maximum swapped-memory value, but it also showed more major page faults and a higher average swap-out rate during the sampled \texttt{vmstat} interval.
+
+The most likely explanation is that the measured workload did not strongly activate the intended PSI-gated path. The patched run captured \texttt{full avg10=0.00} both before and after the workload, so the \texttt{PSI\_FULL\_THRESHOLD\_PCT=25} guard may not have been crossed during the sampled window. In that case, PressurePause correctly falls back to normal direct reclaim, which explains why the first benchmark does not show a strong positive difference.
+
+\subsection{Limitations}
+
+This evaluation is a first validation run, not a statistically complete performance study. Only one run per kernel was captured, the baseline pressure files reported ``no PSI'', and the workload may not have generated enough sustained \texttt{full} memory pressure to trigger the 20\,ms bounded pause. A stronger follow-up would repeat each run multiple times under a smaller RAM limit or heavier memory pressure, then compare p95/p99 latency, PSI totals, major faults, and swap activity across trials.
 
 \section{Conclusion}
 
-The baseline Linux~v6.8.12 kernel was built and installed with \texttt{LOCALVERSION=-baseline}. The PressurePause patch was implemented on branch \texttt{pressurepause}, built as \texttt{6.8.12-pressurepause}, and exported to \texttt{kernel/patches/0001-pressurepause.patch}. Remaining work: install/reboot verification on the patched kernel, Phase~4 benchmarks (baseline vs.\ pressurepause), and final results discussion.
+The baseline Linux~v6.8.12 kernel was built and installed with \texttt{LOCALVERSION=-baseline}. The PressurePause patch was implemented on branch \texttt{pressurepause}, built and booted as \texttt{6.8.12-pressurepause+}, and exported to \texttt{kernel/patches/0001-pressurepause.patch}. Phase~4 benchmarking shows the modification is functionally stable, but the first result set is mixed: the patched kernel completed the workload and avoided residual swap use, while major faults and average swap-out activity increased. The project therefore demonstrates a safe kernel-level reclaim experiment and records the next measurement step clearly: repeat under stronger sustained memory pressure where PSI \texttt{full} crosses the configured threshold.
 
 \end{document}
