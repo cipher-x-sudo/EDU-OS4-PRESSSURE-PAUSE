@@ -1,0 +1,8 @@
+activations 70
+entered 70
+skip_psi_low 0
+skip_zones_ok 0
+skip_no_reclaimable 0
+skip_cgroup 0
+peak_psi_some_avg10 0.74
+peak_psi_full_avg10 0.46

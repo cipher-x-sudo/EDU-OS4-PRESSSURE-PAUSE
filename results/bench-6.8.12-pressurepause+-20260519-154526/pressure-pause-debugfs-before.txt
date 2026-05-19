@@ -1,1 +1,0 @@
-pressure_pause debugfs unavailable (mount debugfs or use sudo)

@@ -1,3 +1,0 @@
-stress-ng: info:  [2918] setting to a 120 second (2 mins, 0.00 secs) run per stressor
-stress-ng: info:  [2918] dispatching hogs: 4 vm
-stress-ng: info:  [2918] successful run completed in 120.04s (2 mins, 0.04 secs)

@@ -1,0 +1,15 @@
+run_type=after
+kernel_role=patched
+kernel=6.8.12-pressurepause+
+date=2026-05-19T15:59:01-04:00
+host=huzaifa
+uname=Linux huzaifa 6.8.12-pressurepause+ #10 SMP PREEMPT_DYNAMIC Tue May 19 15:43:26 EDT 2026 x86_64 x86_64 x86_64 GNU/Linux
+stress_timeout_s=120
+vm_workers=8
+vm_bytes_pct=93
+vmstat_interval_s=1
+vmstat_duration_s=130
+vmstat_count=130
+collect_psi=yes
+psi_interval_s=5
+command=/home/huzaifa/EDU-OS4-KILL-LOOP/bench-run.sh
