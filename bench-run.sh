@@ -97,13 +97,40 @@ pgmajfault_value() {
 	awk '{print $2}' "$1" 2>/dev/null || echo "0"
 }
 
+PRESSURE_PAUSE_DEBUGFS="/sys/kernel/debug/pressure_pause_activations"
+
+read_pressure_pause_debugfs() {
+	if [[ -r "$PRESSURE_PAUSE_DEBUGFS" ]]; then
+		cat "$PRESSURE_PAUSE_DEBUGFS"
+		return 0
+	fi
+	if command -v sudo >/dev/null && sudo test -r "$PRESSURE_PAUSE_DEBUGFS" 2>/dev/null; then
+		sudo cat "$PRESSURE_PAUSE_DEBUGFS"
+		return 0
+	fi
+	return 1
+}
+
+snapshot_pressure_pause_debugfs() {
+	local dest="$1"
+	if read_pressure_pause_debugfs >"$dest" 2>/dev/null; then
+		return 0
+	fi
+	echo "pressure_pause debugfs unavailable (mount debugfs or use sudo)" >"$dest"
+	return 1
+}
+
+pressure_pause_activations_value() {
+	awk '/^activations/{print $2}' "$1" 2>/dev/null || echo "0"
+}
+
 echo "=== PressurePause benchmark ==="
 echo "repo:   $ROOT"
 echo "kernel: $KR"
 echo "run_type=$run_type  kernel_role=$kernel_role"
 echo ""
 
-# --- interactive parameters ---
+# --- parameters (interactive or BENCH_AUTO=1) ---
 STRESS_TIMEOUT=""
 VM_WORKERS=""
 VM_BYTES_PCT=""
@@ -112,15 +139,26 @@ VMSTAT_DURATION=""
 COLLECT_PSI=""
 PSI_INTERVAL=""
 
-prompt "stress-ng timeout (seconds)" "120" STRESS_TIMEOUT
-prompt "stress-ng VM workers (--vm)" "4" VM_WORKERS
-prompt "stress-ng vm-bytes percent" "85" VM_BYTES_PCT
-prompt "vmstat sample interval (seconds)" "1" VMSTAT_INTERVAL
-default_vmstat_duration=$((STRESS_TIMEOUT + 10))
-prompt "vmstat total duration (seconds)" "$default_vmstat_duration" VMSTAT_DURATION
-prompt_yn "Collect PSI samples during stress?" "yes" COLLECT_PSI
-if [[ "$COLLECT_PSI" == "yes" ]]; then
-	prompt "PSI sample interval (seconds)" "5" PSI_INTERVAL
+if [[ -n "${BENCH_AUTO:-}" ]]; then
+	STRESS_TIMEOUT="${BENCH_STRESS_TIMEOUT:-120}"
+	VM_WORKERS="${BENCH_VM_WORKERS:-4}"
+	VM_BYTES_PCT="${BENCH_VM_BYTES_PCT:-85}"
+	VMSTAT_INTERVAL="${BENCH_VMSTAT_INTERVAL:-1}"
+	VMSTAT_DURATION="${BENCH_VMSTAT_DURATION:-$((STRESS_TIMEOUT + 10))}"
+	COLLECT_PSI="${BENCH_COLLECT_PSI:-yes}"
+	PSI_INTERVAL="${BENCH_PSI_INTERVAL:-5}"
+	BENCH_SKIP_CONFIRM="${BENCH_SKIP_CONFIRM:-1}"
+else
+	prompt "stress-ng timeout (seconds)" "120" STRESS_TIMEOUT
+	prompt "stress-ng VM workers (--vm)" "4" VM_WORKERS
+	prompt "stress-ng vm-bytes percent" "85" VM_BYTES_PCT
+	prompt "vmstat sample interval (seconds)" "1" VMSTAT_INTERVAL
+	default_vmstat_duration=$((STRESS_TIMEOUT + 10))
+	prompt "vmstat total duration (seconds)" "$default_vmstat_duration" VMSTAT_DURATION
+	prompt_yn "Collect PSI samples during stress?" "yes" COLLECT_PSI
+	if [[ "$COLLECT_PSI" == "yes" ]]; then
+		prompt "PSI sample interval (seconds)" "5" PSI_INTERVAL
+	fi
 fi
 
 if ! [[ "$STRESS_TIMEOUT" =~ ^[0-9]+$ ]] ||
@@ -154,12 +192,17 @@ echo "  vmstat:     ${VMSTAT_INTERVAL} ${VMSTAT_COUNT}  (~${VMSTAT_DURATION}s) -
 if [[ "$COLLECT_PSI" == "yes" ]]; then
 	echo "  PSI samples: every ${PSI_INTERVAL}s -> pressure-samples.txt"
 fi
+if [[ "$kernel_role" == "patched" ]]; then
+	echo "  debugfs:    pressure_pause_activations (before/after stress)"
+fi
 echo ""
-read -r -p "Start benchmark? [Y/n]: " confirm || true
-confirm="${confirm:-Y}"
-if [[ "${confirm,,}" == "n" || "${confirm,,}" == "no" ]]; then
-	echo "Aborted."
-	exit 0
+if [[ -z "${BENCH_SKIP_CONFIRM:-}" ]]; then
+	read -r -p "Start benchmark? [Y/n]: " confirm || true
+	confirm="${confirm:-Y}"
+	if [[ "${confirm,,}" == "n" || "${confirm,,}" == "no" ]]; then
+		echo "Aborted."
+		exit 0
+	fi
 fi
 
 {
@@ -185,6 +228,9 @@ echo "[1/4] Before snapshots..."
 snapshot_pgmajfault "$OUT/vmstat-before.txt"
 snapshot_pressure "$OUT/pressure-before.txt"
 snapshot_free "$OUT/free-before.txt"
+if [[ "$kernel_role" == "patched" ]]; then
+	snapshot_pressure_pause_debugfs "$OUT/pressure-pause-debugfs-before.txt" || true
+fi
 
 STRESS_MARKER="$OUT/.stress-running"
 : >"$STRESS_MARKER"
@@ -247,6 +293,9 @@ echo "[4/4] After snapshots..."
 snapshot_pgmajfault "$OUT/vmstat-after.txt"
 snapshot_pressure "$OUT/pressure-after.txt"
 snapshot_free "$OUT/free-after.txt"
+if [[ "$kernel_role" == "patched" ]]; then
+	snapshot_pressure_pause_debugfs "$OUT/pressure-pause-debugfs-after.txt" || true
+fi
 
 if [[ -n "${VMSTAT_PID:-}" ]] && kill -0 "$VMSTAT_PID" 2>/dev/null; then
 	echo "Waiting for vmstat to finish..."
@@ -259,10 +308,25 @@ before_pf="$(pgmajfault_value "$OUT/vmstat-before.txt")"
 after_pf="$(pgmajfault_value "$OUT/vmstat-after.txt")"
 delta_pf=$((after_pf - before_pf))
 
+pp_act_delta=""
+if [[ "$kernel_role" == "patched" &&
+	-f "$OUT/pressure-pause-debugfs-before.txt" &&
+	-f "$OUT/pressure-pause-debugfs-after.txt" ]]; then
+	pp_before="$(pressure_pause_activations_value "$OUT/pressure-pause-debugfs-before.txt")"
+	pp_after="$(pressure_pause_activations_value "$OUT/pressure-pause-debugfs-after.txt")"
+	pp_act_delta=$((pp_after - pp_before))
+fi
+
 echo ""
 echo "=== benchmark complete ==="
 echo "Results:  $OUT"
 echo "pgmajfault: before=$before_pf  after=$after_pf  delta=+$delta_pf"
+if [[ -n "$pp_act_delta" ]]; then
+	echo "pressure_pause activations: before=$pp_before  after=$pp_after  delta=+$pp_act_delta"
+	if [[ "$pp_act_delta" -le 0 ]]; then
+		echo "warning: no PressurePause activations during stress (see pressure-pause-debugfs-*.txt)" >&2
+	fi
+fi
 if [[ "$stress_rc" -ne 0 ]]; then
 	echo "stress-ng exited with status $stress_rc (see stress-ng.txt)" >&2
 fi

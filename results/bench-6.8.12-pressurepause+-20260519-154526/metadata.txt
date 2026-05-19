@@ -1,0 +1,15 @@
+run_type=after
+kernel_role=patched
+kernel=6.8.12-pressurepause+
+date=2026-05-19T15:45:26-04:00
+host=huzaifa
+uname=Linux huzaifa 6.8.12-pressurepause+ #9 SMP PREEMPT_DYNAMIC Tue May 19 14:47:15 EDT 2026 x86_64 x86_64 x86_64 GNU/Linux
+stress_timeout_s=60
+vm_workers=4
+vm_bytes_pct=85
+vmstat_interval_s=1
+vmstat_duration_s=70
+vmstat_count=70
+collect_psi=yes
+psi_interval_s=5
+command=./bench-run.sh

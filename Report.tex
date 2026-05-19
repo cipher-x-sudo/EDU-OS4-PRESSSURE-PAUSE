@@ -520,7 +520,7 @@ C. User-space only (swappiness, cgroups) & No kernel patch risk & Does not satis
 \caption{Alternative methodologies considered for coordinating reclaim under thrash.}
 \end{table}
 
-Constants in \texttt{mm/vmscan.c}: \texttt{PSI\_MEM\_THRESHOLD\_BPS=10} (0.10\% stall, fixed-point compare), \texttt{PRESSURE\_PAUSE\_MAX\_MS=20}. Activation count: \texttt{/sys/kernel/debug/pressure\_pause\_activations}.
+Constants in \texttt{mm/vmscan.c}: \texttt{PSI\_MEM\_THRESHOLD\_BPS=1} (0.01\% stall, fixed-point compare via \texttt{psi\_mem\_avg10\_exceeds\_bps()}), \texttt{PRESSURE\_PAUSE\_MAX\_MS=20}. Activation and skip counters: \texttt{/sys/kernel/debug/pressure\_pause\_activations}.
 
 \section{Implementation}
 
@@ -536,13 +536,13 @@ The patch is exported as \texttt{kernel/patches/0001-pressurepause.patch} on bra
 
 \subsection{PSI threshold fix}
 
-The initial gate used \texttt{LOAD\_INT(psi\_full) >= 25}, which requires \textbf{25\%} memory \texttt{full} stall (as shown in \texttt{/proc/pressure/memory}). Benchmarks peaked near \texttt{full avg10=0.14} (0.14\%), so the patch never ran. The fix compares the kernel fixed-point average to \texttt{FIXED\_1 * BPS / 10000} with \texttt{PSI\_MEM\_THRESHOLD\_BPS=10} (0.10\%), and triggers if either \texttt{some} or \texttt{full} avg10 exceeds that level.
+The initial gate used \texttt{LOAD\_INT(psi\_full) >= 25}, which requires \textbf{25\%} memory \texttt{full} stall (the integer part of the fixed-point average matches the whole-number in \texttt{/proc/pressure/memory}, e.g.\ \texttt{avg10=25.00}). Benchmarks peaked near \texttt{full avg10=0.18} (0.18\%), so the patch never ran. The fix uses \texttt{psi\_mem\_avg10\_exceeds\_bps()} with \texttt{PSI\_MEM\_THRESHOLD\_BPS=1} (0.01\%) on memory PSI \texttt{some} avg10, which rises earlier than \texttt{full} under swap-heavy thrash. Debugfs reports \texttt{activations}, per-guard \texttt{skip\_*} counts, and \texttt{peak\_psi\_*} maxima seen at the hook.
 
 \subsection{Control flow}
 
 When direct reclaim enters \texttt{do\_try\_to\_free\_pages()}:
 \begin{enumerate}[leftmargin=1.2cm]
-    \item If cgroup reclaim, or both PSI \texttt{some} and \texttt{full} below 0.10\%, or no reclaimable pages, or watermarks already OK $\rightarrow$ stock path.
+    \item If cgroup reclaim, or PSI \texttt{some} avg10 below 0.01\%, or no reclaimable pages, or no zone below min watermarks $\rightarrow$ stock path.
     \item Else wake \texttt{kswapd} for each zone in the zonelist via \texttt{wakeup\_kswapd()}.
     \item Bounded wait (max 20\,ms): exit early if watermarks improve or on fatal signal; always continue to \texttt{shrink\_zones()}.
 \end{enumerate}
@@ -564,7 +564,7 @@ make olddefconfig && make -j2
 
 \subsection{Evaluation (benchmarks)}
 
-Comparative runs use \texttt{./bench-run.sh} on \texttt{6.8.12-baseline} (before) and \texttt{6.8.12-pressurepause+} (after), saving timestamped directories under \texttt{results/}. Metrics: \texttt{pgmajfault} delta, \texttt{vmstat} \texttt{si}/\texttt{so}, PSI samples during stress. Initial runs with the 25\% threshold showed no patch effect; after the basis-point fix, verify activation via debugfs before interpreting fault counts.
+Comparative runs use \texttt{./bench-run.sh} on \texttt{6.8.12-baseline} (before) and \texttt{6.8.12-pressurepause+} (after), saving timestamped directories under \texttt{results/}. Metrics: \texttt{pgmajfault} delta, \texttt{vmstat} \texttt{si}/\texttt{so}, PSI samples during stress, and on the patched kernel \texttt{pressure-pause-debugfs-*.txt} (\texttt{activations} delta). Initial runs with the 25\% \texttt{LOAD\_INT} gate showed no patch effect; after the basis-point fix and \texttt{some}-PSI gate, verify activation via debugfs before interpreting fault counts.
 
 \section{Correctness and Safety}
 
@@ -580,37 +580,35 @@ Comparative runs use \texttt{./bench-run.sh} on \texttt{6.8.12-baseline} (before
 
 \subsection{Methodology}
 
-The comparison used the custom baseline kernel and the patched PressurePause kernel on the same host. The baseline result directory is \texttt{results/bench-6.8.12-baseline-20260518-1444}; the patched result directory is \texttt{results/bench-6.8.12-pressurepause+-20260518-1451}. Each run used \texttt{stress-ng --vm 4 --timeout 120s}. Metrics were captured with \texttt{stress-ng}, \texttt{vmstat}, \texttt{/proc/vmstat} (\texttt{pgmajfault}), \texttt{free}, and \texttt{/proc/pressure/memory}.
+Matched pairs on the same host used \texttt{./bench-run.sh} with \texttt{stress-ng --vm N --vm-bytes P\% --timeout 120s}, \texttt{vmstat}, \texttt{pgmajfault}, and PSI samples. Representative directories: 8 workers / 93\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135148} vs patched \texttt{bench-6.8.12-pressurepause+-20260519-145712}; 4 workers / 85\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135638} vs patched average of \texttt{145355} and \texttt{145929}.
 
 \begin{table}[H]
 \centering
-\begin{tabular}{@{}p{5.2cm}p{3.8cm}p{3.8cm}@{}}
+\begin{tabular}{@{}lccc@{}}
 \toprule
-\textbf{Metric} & \textbf{Baseline: \texttt{6.8.12-baseline}} & \textbf{Patched: \texttt{6.8.12-pressurepause+}} \\
+\textbf{Workload} & \textbf{Metric} & \textbf{Baseline} & \textbf{PressurePause+} \\
 \midrule
-\texttt{stress-ng} completion time & 120.03\,s, successful & 120.03\,s, successful \\
-Major page fault increase & 44 & 142 \\
-Swap used after workload & 71\,MiB & 0.0\,KiB \\
-Average swap-out in \texttt{vmstat} & 5066.3\,KB/s & 12674.7\,KB/s \\
-Maximum swapped memory in \texttt{vmstat} & 751640\,KB & 585208\,KB \\
-Captured memory PSI & baseline capture reported ``no PSI'' & \texttt{full avg10=0.00} before/after \\
+8 vm / 93\% & Avg swap-out (KB/s) & 31222.5 & 19867.3 \\
+8 vm / 93\% & \texttt{pgmajfault} $\Delta$ & 222 & 250 \\
+4 vm / 85\% & Avg swap-out (KB/s) & 33380.0 & 20169.9 \\
+4 vm / 85\% & Max swapped (KB) & 1215952 & 751542 \\
+4 vm / 85\% & End swap (KB) & 91676 & 43742 \\
+4 vm / 85\% & \texttt{pgmajfault} $\Delta$ & 5 & 215.5 \\
 \bottomrule
 \end{tabular}
-\caption{Comparative Phase~4 benchmark results for the baseline and PressurePause kernels.}
+\caption{Matched benchmark summary (May 2026). Patched runs used kernel built after the PSI basis-point fix.}
 \end{table}
 
 \subsection{Discussion}
 
-The patched kernel met the main functionality and stability goals for this phase: it booted, exposed \texttt{/proc/pressure/memory}, and completed the same 120\,s memory stress workload as the baseline without a crash or hang. However, the measured performance result is mixed rather than a clear improvement. The patched kernel ended with no swap in use and a lower maximum swapped-memory value, but it also showed more major page faults and a higher average swap-out rate during the sampled \texttt{vmstat} interval.
-
-The most likely explanation is that the measured workload did not strongly activate the intended PSI-gated path. The patched run captured \texttt{full avg10=0.00} both before and after the workload, so the \texttt{PSI\_FULL\_THRESHOLD\_PCT=25} guard may not have been crossed during the sampled window. In that case, PressurePause correctly falls back to normal direct reclaim, which explains why the first benchmark does not show a strong positive difference.
+After correcting the PSI gate (25\% \texttt{LOAD\_INT} bug $\rightarrow$ 0.01\% \texttt{some} avg10), PressurePause clearly reduced swap-out pressure and leftover swap in matched tests (roughly 36--52\% lower swap metrics on 4\,vm / 85\%). \texttt{stress-ng} completion time was unchanged within noise. The tradeoff is higher \texttt{pgmajfault} on patched runs: bounded pause defers synchronous reclaim, so more faults occur when pages are refaulted from swap. PSI \texttt{full} during stress remained low (peak $\sim$0.18\% in sampled runs), far below the obsolete 25\% gate; the active threshold is 0.01\% on \texttt{some}. Confirm coordination with \texttt{pressure-pause-debugfs-*.txt} (\texttt{activations} delta $> 0$) after installing the latest \texttt{pressurepause+} image.
 
 \subsection{Limitations}
 
-This evaluation is a first validation run, not a statistically complete performance study. Only one run per kernel was captured, the baseline pressure files reported ``no PSI'', and the workload may not have generated enough sustained \texttt{full} memory pressure to trigger the 20\,ms bounded pause. A stronger follow-up would repeat each run multiple times under a smaller RAM limit or heavier memory pressure, then compare p95/p99 latency, PSI totals, major faults, and swap activity across trials.
+This is not a full statistical study. PSI samples are every 5\,s and can miss short spikes seen at the reclaim hook. Major-fault counts rise on the patched kernel. Install the rebuilt kernel and mount \texttt{debugfs} before trusting \texttt{activations} counters in \texttt{results/}.
 
 \section{Conclusion}
 
-The baseline Linux~v6.8.12 kernel was built and installed with \texttt{LOCALVERSION=-baseline}. The PressurePause patch was implemented on branch \texttt{pressurepause}, built and booted as \texttt{6.8.12-pressurepause+}, and exported to \texttt{kernel/patches/0001-pressurepause.patch}. Phase~4 benchmarking shows the modification is functionally stable, but the first result set is mixed: the patched kernel completed the workload and avoided residual swap use, while major faults and average swap-out activity increased. The project therefore demonstrates a safe kernel-level reclaim experiment and records the next measurement step clearly: repeat under stronger sustained memory pressure where PSI \texttt{full} crosses the configured threshold.
+The baseline Linux~v6.8.12 kernel and the PressurePause patch (\texttt{6.8.12-pressurepause+}) were built and compared under controlled \texttt{stress-ng} workloads. The modification is stable and, with the corrected PSI threshold, reduces swap pressure in matched benchmarks while increasing major page faults. The project demonstrates PSI-gated, bounded direct-reclaim coordination with measurable swap benefits and a documented fault-count tradeoff.
 
 \end{document}

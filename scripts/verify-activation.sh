@@ -5,6 +5,12 @@ set -euo pipefail
 KR="$(uname -r)"
 DBG="/sys/kernel/debug/pressure_pause_activations"
 
+if [[ ! -d /sys/kernel/debug ]] && [[ $(id -u) -ne 0 ]]; then
+	if command -v sudo >/dev/null; then
+		sudo mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+	fi
+fi
+
 if [[ "$KR" != *pressurepause* ]]; then
 	echo "error: boot 6.8.12-pressurepause+ first (got $KR)" >&2
 	exit 1

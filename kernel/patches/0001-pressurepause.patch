@@ -1,51 +1,35 @@
-From 0910e8f4f37ee6aae20be3d584a385c40caa32ea Mon Sep 17 00:00:00 2001
-From: huziaf <huzaifaphantompak@gmail.com>
-Date: Mon, 18 May 2026 14:07:34 -0400
-Subject: [PATCH 1/2] mm: PressurePause PSI-gated bounded direct reclaim
- coordination
-
-Add psi_mem_full_avg10() to read system memory PSI full avg10, and
-pressure_pause_maybe() at do_try_to_free_pages() entry to wake kswapd
-and wait up to PRESSURE_PAUSE_MAX_MS when PSI full exceeds threshold,
-then fall through to stock shrink_zones() reclaim.
-
-Co-authored-by: Cursor <cursoragent@cursor.com>
----
- include/linux/psi.h |  3 ++
- kernel/sched/psi.c  | 20 ++++++++++
- mm/vmscan.c         | 95 +++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 118 insertions(+)
-
 diff --git a/include/linux/psi.h b/include/linux/psi.h
-index e0745873e..ca0094e8b 100644
+index e0745873e..ec9491baa 100644
 --- a/include/linux/psi.h
 +++ b/include/linux/psi.h
-@@ -22,6 +22,8 @@ void psi_init(void);
+@@ -22,6 +22,9 @@ void psi_init(void);
  void psi_memstall_enter(unsigned long *flags);
  void psi_memstall_leave(unsigned long *flags);
  
 +unsigned long psi_mem_full_avg10(void);
++unsigned long psi_mem_some_avg10(void);
 +
  int psi_show(struct seq_file *s, struct psi_group *group, enum psi_res res);
  struct psi_trigger *psi_trigger_create(struct psi_group *group, char *buf,
  				       enum psi_res res, struct file *file,
-@@ -49,6 +51,7 @@ static inline void psi_init(void) {}
+@@ -49,6 +52,8 @@ static inline void psi_init(void) {}
  
  static inline void psi_memstall_enter(unsigned long *flags) {}
  static inline void psi_memstall_leave(unsigned long *flags) {}
 +static inline unsigned long psi_mem_full_avg10(void) { return 0; }
++static inline unsigned long psi_mem_some_avg10(void) { return 0; }
  
  #ifdef CONFIG_CGROUPS
  static inline int psi_cgroup_alloc(struct cgroup *cgrp)
 diff --git a/kernel/sched/psi.c b/kernel/sched/psi.c
-index 7b4aa5809..4cf799f68 100644
+index 7b4aa5809..37fa0ef7d 100644
 --- a/kernel/sched/psi.c
 +++ b/kernel/sched/psi.c
-@@ -1222,6 +1222,26 @@ void psi_cgroup_restart(struct psi_group *group)
+@@ -1222,6 +1222,37 @@ void psi_cgroup_restart(struct psi_group *group)
  }
  #endif /* CONFIG_CGROUPS */
  
-+unsigned long psi_mem_full_avg10(void)
++static unsigned long psi_mem_avg10(enum psi_states state)
 +{
 +	unsigned long avg;
 +	u64 now;
@@ -58,18 +42,29 @@ index 7b4aa5809..4cf799f68 100644
 +	collect_percpu_times(&psi_system, PSI_AVGS, NULL);
 +	if (now >= psi_system.avg_next_update)
 +		psi_system.avg_next_update = update_averages(&psi_system, now);
-+	avg = psi_system.avg[PSI_MEM_FULL][0];
++	avg = psi_system.avg[state][0];
 +	mutex_unlock(&psi_system.avgs_lock);
 +
 +	return avg;
 +}
++
++unsigned long psi_mem_full_avg10(void)
++{
++	return psi_mem_avg10(PSI_MEM_FULL);
++}
 +EXPORT_SYMBOL_GPL(psi_mem_full_avg10);
++
++unsigned long psi_mem_some_avg10(void)
++{
++	return psi_mem_avg10(PSI_MEM_SOME);
++}
++EXPORT_SYMBOL_GPL(psi_mem_some_avg10);
 +
  int psi_show(struct seq_file *m, struct psi_group *group, enum psi_res res)
  {
  	bool only_full = false;
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 4255619a1..679e08abe 100644
+index 4255619a1..05a9a11c5 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -63,6 +63,7 @@
@@ -80,16 +75,103 @@ index 4255619a1..679e08abe 100644
  
  #include "internal.h"
  #include "swap.h"
-@@ -6169,6 +6170,98 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
+@@ -6169,6 +6170,201 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
  	target_lruvec->refaults[WORKINGSET_FILE] = refaults;
  }
  
 +#ifdef CONFIG_PSI
-+#define PSI_FULL_THRESHOLD_PCT	25
++/*
++ * PSI avg10 threshold in basis points (100 bps = 1.00% as shown in
++ * /proc/pressure/memory).  Old LOAD_INT(psi) >= 25 compared the integer
++ * part of the fixed-point average to 25, i.e. 25.00% stall — not 0.25%.
++ * Benchmarks peaked near full avg10=0.18 (0.18%) and never crossed that gate.
++ */
++#define PSI_MEM_THRESHOLD_BPS	1
 +#define PRESSURE_PAUSE_MAX_MS	20
 +
-+static bool pressure_pause_zones_ok(struct zonelist *zonelist,
-+				    struct scan_control *sc)
++/* Same fixed-point units as psi_mem_*_avg10() / /proc/pressure/memory avg10. */
++static inline unsigned long psi_mem_threshold_fixed(unsigned int bps)
++{
++	return (unsigned long)FIXED_1 * bps / 10000;
++}
++
++static inline bool psi_mem_avg10_exceeds_bps(unsigned long avg, unsigned int bps)
++{
++	return avg >= psi_mem_threshold_fixed(bps);
++}
++
++static atomic64_t pressure_pause_activations;
++static atomic64_t pressure_pause_entered;
++static atomic64_t pressure_pause_skip_psi;
++static atomic64_t pressure_pause_skip_zones_ok;
++static atomic64_t pressure_pause_skip_no_reclaimable;
++static atomic64_t pressure_pause_skip_cgroup;
++static atomic64_t pressure_pause_peak_psi_some;
++static atomic64_t pressure_pause_peak_psi_full;
++
++static void pressure_pause_note_psi(unsigned long psi_some, unsigned long psi_full)
++{
++	unsigned long peak;
++
++	peak = atomic64_read(&pressure_pause_peak_psi_some);
++	if (psi_some > peak)
++		atomic64_set(&pressure_pause_peak_psi_some, psi_some);
++
++	peak = atomic64_read(&pressure_pause_peak_psi_full);
++	if (psi_full > peak)
++		atomic64_set(&pressure_pause_peak_psi_full, psi_full);
++}
++
++static int pressure_pause_count_show(struct seq_file *m, void *p)
++{
++	seq_printf(m, "activations %lld\n", atomic64_read(&pressure_pause_activations));
++	seq_printf(m, "entered %lld\n", atomic64_read(&pressure_pause_entered));
++	seq_printf(m, "skip_psi_low %lld\n", atomic64_read(&pressure_pause_skip_psi));
++	seq_printf(m, "skip_zones_ok %lld\n", atomic64_read(&pressure_pause_skip_zones_ok));
++	seq_printf(m, "skip_no_reclaimable %lld\n",
++		   atomic64_read(&pressure_pause_skip_no_reclaimable));
++	seq_printf(m, "skip_cgroup %lld\n", atomic64_read(&pressure_pause_skip_cgroup));
++	seq_printf(m, "peak_psi_some_avg10 %llu.%02llu\n",
++		   LOAD_INT(atomic64_read(&pressure_pause_peak_psi_some)),
++		   LOAD_FRAC(atomic64_read(&pressure_pause_peak_psi_some)));
++	seq_printf(m, "peak_psi_full_avg10 %llu.%02llu\n",
++		   LOAD_INT(atomic64_read(&pressure_pause_peak_psi_full)),
++		   LOAD_FRAC(atomic64_read(&pressure_pause_peak_psi_full)));
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(pressure_pause_count);
++
++static int __init pressure_pause_debugfs_init(void)
++{
++	debugfs_create_file("pressure_pause_activations", 0444, NULL, NULL,
++			    &pressure_pause_count_fops);
++	return 0;
++}
++late_initcall(pressure_pause_debugfs_init);
++
++/* True if any managed zone in the zonelist still needs reclaim (not at min). */
++static bool pressure_pause_under_pressure(struct zonelist *zonelist,
++					  struct scan_control *sc)
++{
++	struct zoneref *z;
++	struct zone *zone;
++	bool any = false;
++
++	for_each_zone_zonelist_nodemask(zone, z, zonelist, sc->reclaim_idx,
++					sc->nodemask) {
++		if (!managed_zone(zone))
++			continue;
++		any = true;
++		if (!zone_watermark_ok(zone, sc->order, min_wmark_pages(zone),
++				       sc->reclaim_idx, 0))
++			return true;
++	}
++	return false;
++}
++
++/* True if any zone has reached min watermarks (progress / relief). */
++static bool pressure_pause_any_zone_ok(struct zonelist *zonelist,
++				       struct scan_control *sc)
 +{
 +	struct zoneref *z;
 +	struct zone *zone;
@@ -142,29 +224,45 @@ index 4255619a1..679e08abe 100644
 +static void pressure_pause_maybe(struct zonelist *zonelist,
 +				 struct scan_control *sc)
 +{
-+	unsigned long psi_full;
++	unsigned long psi_full, psi_some;
 +	unsigned long deadline;
 +
-+	if (cgroup_reclaim(sc))
++	atomic64_inc(&pressure_pause_entered);
++
++	if (cgroup_reclaim(sc)) {
++		atomic64_inc(&pressure_pause_skip_cgroup);
 +		return;
++	}
 +
 +	psi_full = psi_mem_full_avg10();
-+	if (LOAD_INT(psi_full) < PSI_FULL_THRESHOLD_PCT)
-+		return;
++	psi_some = psi_mem_some_avg10();
++	pressure_pause_note_psi(psi_some, psi_full);
 +
-+	if (!pressure_pause_has_reclaimable(zonelist, sc))
++	/* Gate on memory PSI "some" — rises earlier than "full" under swap thrash. */
++	if (!psi_mem_avg10_exceeds_bps(psi_some, PSI_MEM_THRESHOLD_BPS)) {
++		atomic64_inc(&pressure_pause_skip_psi);
 +		return;
++	}
 +
-+	if (pressure_pause_zones_ok(zonelist, sc))
++	if (!pressure_pause_has_reclaimable(zonelist, sc)) {
++		atomic64_inc(&pressure_pause_skip_no_reclaimable);
 +		return;
++	}
++
++	/* Only skip if no zone in the zonelist is under min watermarks. */
++	if (!pressure_pause_under_pressure(zonelist, sc)) {
++		atomic64_inc(&pressure_pause_skip_zones_ok);
++		return;
++	}
 +
 +	pressure_pause_wake_kswapd(zonelist, sc);
++	atomic64_inc(&pressure_pause_activations);
 +
 +	deadline = jiffies + msecs_to_jiffies(PRESSURE_PAUSE_MAX_MS);
 +	while (time_before(jiffies, deadline)) {
 +		if (fatal_signal_pending(current))
 +			break;
-+		if (pressure_pause_zones_ok(zonelist, sc))
++		if (pressure_pause_any_zone_ok(zonelist, sc))
 +			break;
 +		schedule_timeout_idle(1);
 +	}
@@ -179,7 +277,7 @@ index 4255619a1..679e08abe 100644
  /*
   * This is the main entry point to direct page reclaim.
   *
-@@ -6198,6 +6291,8 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
+@@ -6198,6 +6394,8 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
  	if (!cgroup_reclaim(sc))
  		__count_zid_vm_events(ALLOCSTALL, sc->reclaim_idx, 1);
  
@@ -188,151 +286,3 @@ index 4255619a1..679e08abe 100644
  	do {
  		if (!sc->proactive)
  			vmpressure_prio(sc->gfp_mask, sc->target_mem_cgroup,
--- 
-2.34.1
-
-From b1d918de97cacfc8c3ba4511705a961b33dc7fcc Mon Sep 17 00:00:00 2001
-From: huziaf <huzaifaphantompak@gmail.com>
-Date: Tue, 19 May 2026 14:37:56 -0400
-Subject: [PATCH 2/2] mm: fix PSI threshold to basis points; add some-PSI gate
- and activation counter
-
-LOAD_INT >= 25 required 25% full stall; benchmarks peaked at ~0.14%.
-Use fixed-point compare at 10 bps (0.10%), trigger on mem some or full.
-Expose activation count via debugfs pressure_pause_activations.
-
-Co-authored-by: Cursor <cursoragent@cursor.com>
----
- include/linux/psi.h |  2 ++
- kernel/sched/psi.c  | 15 +++++++++++++--
- mm/vmscan.c         | 33 ++++++++++++++++++++++++++++++---
- 3 files changed, 45 insertions(+), 5 deletions(-)
-
-diff --git a/include/linux/psi.h b/include/linux/psi.h
-index ca0094e8b..ec9491baa 100644
---- a/include/linux/psi.h
-+++ b/include/linux/psi.h
-@@ -23,6 +23,7 @@ void psi_memstall_enter(unsigned long *flags);
- void psi_memstall_leave(unsigned long *flags);
- 
- unsigned long psi_mem_full_avg10(void);
-+unsigned long psi_mem_some_avg10(void);
- 
- int psi_show(struct seq_file *s, struct psi_group *group, enum psi_res res);
- struct psi_trigger *psi_trigger_create(struct psi_group *group, char *buf,
-@@ -52,6 +53,7 @@ static inline void psi_init(void) {}
- static inline void psi_memstall_enter(unsigned long *flags) {}
- static inline void psi_memstall_leave(unsigned long *flags) {}
- static inline unsigned long psi_mem_full_avg10(void) { return 0; }
-+static inline unsigned long psi_mem_some_avg10(void) { return 0; }
- 
- #ifdef CONFIG_CGROUPS
- static inline int psi_cgroup_alloc(struct cgroup *cgrp)
-diff --git a/kernel/sched/psi.c b/kernel/sched/psi.c
-index 4cf799f68..37fa0ef7d 100644
---- a/kernel/sched/psi.c
-+++ b/kernel/sched/psi.c
-@@ -1222,7 +1222,7 @@ void psi_cgroup_restart(struct psi_group *group)
- }
- #endif /* CONFIG_CGROUPS */
- 
--unsigned long psi_mem_full_avg10(void)
-+static unsigned long psi_mem_avg10(enum psi_states state)
- {
- 	unsigned long avg;
- 	u64 now;
-@@ -1235,13 +1235,24 @@ unsigned long psi_mem_full_avg10(void)
- 	collect_percpu_times(&psi_system, PSI_AVGS, NULL);
- 	if (now >= psi_system.avg_next_update)
- 		psi_system.avg_next_update = update_averages(&psi_system, now);
--	avg = psi_system.avg[PSI_MEM_FULL][0];
-+	avg = psi_system.avg[state][0];
- 	mutex_unlock(&psi_system.avgs_lock);
- 
- 	return avg;
- }
-+
-+unsigned long psi_mem_full_avg10(void)
-+{
-+	return psi_mem_avg10(PSI_MEM_FULL);
-+}
- EXPORT_SYMBOL_GPL(psi_mem_full_avg10);
- 
-+unsigned long psi_mem_some_avg10(void)
-+{
-+	return psi_mem_avg10(PSI_MEM_SOME);
-+}
-+EXPORT_SYMBOL_GPL(psi_mem_some_avg10);
-+
- int psi_show(struct seq_file *m, struct psi_group *group, enum psi_res res)
- {
- 	bool only_full = false;
-diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 679e08abe..8f598dcf7 100644
---- a/mm/vmscan.c
-+++ b/mm/vmscan.c
-@@ -6171,9 +6171,33 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
- }
- 
- #ifdef CONFIG_PSI
--#define PSI_FULL_THRESHOLD_PCT	25
-+/*
-+ * PSI avg10 threshold in basis points (100 bps = 1.00% as shown in
-+ * /proc/pressure/memory).  Old LOAD_INT >= 25 required 25% full stall and
-+ * never fired when peaks were ~0.14%.
-+ */
-+#define PSI_MEM_THRESHOLD_BPS	10
-+#define PSI_MEM_THRESHOLD_FIXED \
-+	((unsigned long)FIXED_1 * PSI_MEM_THRESHOLD_BPS / 10000)
- #define PRESSURE_PAUSE_MAX_MS	20
- 
-+static atomic64_t pressure_pause_activations;
-+
-+static int pressure_pause_count_show(struct seq_file *m, void *p)
-+{
-+	seq_printf(m, "%lld\n", atomic64_read(&pressure_pause_activations));
-+	return 0;
-+}
-+DEFINE_SHOW_ATTRIBUTE(pressure_pause_count);
-+
-+static int __init pressure_pause_debugfs_init(void)
-+{
-+	debugfs_create_file("pressure_pause_activations", 0444, NULL, NULL,
-+			    &pressure_pause_count_fops);
-+	return 0;
-+}
-+late_initcall(pressure_pause_debugfs_init);
-+
- static bool pressure_pause_zones_ok(struct zonelist *zonelist,
- 				    struct scan_control *sc)
- {
-@@ -6228,14 +6252,16 @@ static void pressure_pause_wake_kswapd(struct zonelist *zonelist,
- static void pressure_pause_maybe(struct zonelist *zonelist,
- 				 struct scan_control *sc)
- {
--	unsigned long psi_full;
-+	unsigned long psi_full, psi_some;
- 	unsigned long deadline;
- 
- 	if (cgroup_reclaim(sc))
- 		return;
- 
- 	psi_full = psi_mem_full_avg10();
--	if (LOAD_INT(psi_full) < PSI_FULL_THRESHOLD_PCT)
-+	psi_some = psi_mem_some_avg10();
-+	if (psi_full < PSI_MEM_THRESHOLD_FIXED &&
-+	    psi_some < PSI_MEM_THRESHOLD_FIXED)
- 		return;
- 
- 	if (!pressure_pause_has_reclaimable(zonelist, sc))
-@@ -6245,6 +6271,7 @@ static void pressure_pause_maybe(struct zonelist *zonelist,
- 		return;
- 
- 	pressure_pause_wake_kswapd(zonelist, sc);
-+	atomic64_inc(&pressure_pause_activations);
- 
- 	deadline = jiffies + msecs_to_jiffies(PRESSURE_PAUSE_MAX_MS);
- 	while (time_before(jiffies, deadline)) {
--- 
-2.34.1
-
