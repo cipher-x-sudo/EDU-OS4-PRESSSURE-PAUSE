@@ -6174,7 +6174,7 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
 /*
  * PSI avg10 threshold in basis points (100 bps = 1.00% as shown in
  * /proc/pressure/memory).  Old LOAD_INT(psi) >= 25 compared the integer
- * part of the fixed-point average to 25, i.e. 25.00% stall — not 0.25%.
+ * part of the fixed-point average to 25, i.e. 25.00% stall -- not 0.25%.
  * Benchmarks peaked near full avg10=0.18 (0.18%) and never crossed that gate.
  */
 #define PSI_MEM_THRESHOLD_BPS	1
@@ -6329,7 +6329,7 @@ static void pressure_pause_maybe(struct zonelist *zonelist,
 	psi_some = psi_mem_some_avg10();
 	pressure_pause_note_psi(psi_some, psi_full);
 
-	/* Gate on memory PSI "some" — rises earlier than "full" under swap thrash. */
+	/* Gate on memory PSI "some" -- rises earlier than "full" under swap thrash. */
 	if (!psi_mem_avg10_exceeds_bps(psi_some, PSI_MEM_THRESHOLD_BPS)) {
 		atomic64_inc(&pressure_pause_skip_psi);
 		return;

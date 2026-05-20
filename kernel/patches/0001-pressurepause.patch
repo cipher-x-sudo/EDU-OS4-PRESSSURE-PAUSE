@@ -83,7 +83,7 @@ index 4255619a1..05a9a11c5 100644
 +/*
 + * PSI avg10 threshold in basis points (100 bps = 1.00% as shown in
 + * /proc/pressure/memory).  Old LOAD_INT(psi) >= 25 compared the integer
-+ * part of the fixed-point average to 25, i.e. 25.00% stall — not 0.25%.
++ * part of the fixed-point average to 25, i.e. 25.00% stall -- not 0.25%.
 + * Benchmarks peaked near full avg10=0.18 (0.18%) and never crossed that gate.
 + */
 +#define PSI_MEM_THRESHOLD_BPS	1
@@ -238,7 +238,7 @@ index 4255619a1..05a9a11c5 100644
 +	psi_some = psi_mem_some_avg10();
 +	pressure_pause_note_psi(psi_some, psi_full);
 +
-+	/* Gate on memory PSI "some" — rises earlier than "full" under swap thrash. */
++	/* Gate on memory PSI "some" -- rises earlier than "full" under swap thrash. */
 +	if (!psi_mem_avg10_exceeds_bps(psi_some, PSI_MEM_THRESHOLD_BPS)) {
 +		atomic64_inc(&pressure_pause_skip_psi);
 +		return;

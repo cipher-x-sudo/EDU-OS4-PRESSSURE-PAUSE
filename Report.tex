@@ -100,6 +100,24 @@
     belowskip=2pt
 }
 
+\lstdefinestyle{patchstyle}{
+    basicstyle=\ttfamily\scriptsize,
+    numbers=left,
+    numberstyle=\scriptsize\color{numbercolor},
+    numbersep=8pt,
+    tabsize=8,
+    showspaces=false,
+    showstringspaces=false,
+    breaklines=true,
+    breakatwhitespace=true,
+    columns=fullflexible,
+    keepspaces=true,
+    frame=none,
+    xleftmargin=12pt,
+    aboveskip=4pt,
+    belowskip=4pt
+}
+
 \newtcolorbox{codebox}[1][]{
     enhanced,
     breakable,
@@ -379,8 +397,9 @@ This section satisfies the course requirement to identify the selected kernel co
 
 \begin{itemize}[leftmargin=1.2cm]
     \item \textbf{Course category:} Page replacement / reclaim (PressurePause extends direct reclaim coordination).
-    \item \textbf{Primary files:} \texttt{mm/page\_alloc.c} (allocation slowpath), \texttt{mm/vmscan.c} (reclaim engine).
-    \item \textbf{Supporting context:} \texttt{kernel/sched/psi.c}, \texttt{include/linux/psi\_types.h} (PSI accounting).
+    \item \textbf{Kernel source files modified by PressurePause:} \texttt{include/linux/psi.h} (new avg10 reader declarations and stubs), \texttt{kernel/sched/psi.c} (\texttt{psi\_mem\_avg10()} helper and exports), \texttt{mm/vmscan.c} (hook, threshold, debugfs, and \texttt{\#include <linux/sched/loadavg.h>}).
+    \item \textbf{Related upstream (not modified):} \texttt{mm/page\_alloc.c} --- allocator slowpath and \texttt{\_\_perform\_reclaim} call into \texttt{try\_to\_free\_pages()} in \texttt{vmscan.c}; no PressurePause edits.
+    \item \textbf{PSI background (mostly unchanged):} enums such as \texttt{PSI\_MEM\_SOME} / \texttt{PSI\_MEM\_FULL} in \texttt{include/linux/psi\_types.h}; system accounting remains in \texttt{kernel/sched/psi.c}, which the patch extends with the exported readers above.
     \item \textbf{Implementation hook:} \texttt{pressure\_pause\_maybe()} called from \texttt{do\_try\_to\_free\_pages()} in \texttt{mm/vmscan.c}, line~6397, immediately before the priority loop that calls \texttt{shrink\_zones()}.
 \end{itemize}
 
@@ -393,7 +412,7 @@ When \texttt{get\_page\_from\_freelist()} cannot satisfy an allocation (zone fre
     \item \texttt{wake\_all\_kswapds} --- \texttt{mm/page\_alloc.c} $\sim$3814 (background reclaim hint)
     \item \texttt{\_\_alloc\_pages\_direct\_reclaim} --- \texttt{mm/page\_alloc.c} $\sim$3781
     \item \texttt{psi\_memstall\_enter} / \texttt{\_\_perform\_reclaim} --- \texttt{mm/page\_alloc.c} $\sim$3755--3790
-    \item \texttt{try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6625
+    \item \texttt{try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6604
     \item \texttt{do\_try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6384; \texttt{pressure\_pause\_maybe()} at $\sim$6397
     \item \texttt{shrink\_zones} $\rightarrow$ \texttt{shrink\_node} --- \texttt{mm/vmscan.c} (shared reclaim core)
 \end{enumerate}
@@ -422,43 +441,65 @@ When \texttt{get\_page\_from\_freelist()} cannot satisfy an allocation (zone fre
 
 \subsection{Key Code Excerpts}
 
-\textbf{Direct reclaim entry from the allocator} (\texttt{mm/page\_alloc.c}):
+\noindent\textbf{Upstream (unchanged): direct reclaim entry} (\texttt{mm/page\_alloc.c}):
 
-\begin{codebox}[mm/page\_alloc.c: \_\_perform\_reclaim (lines 3753--3770)]
+\begin{codebox}[mm/page\_alloc.c: \_\_perform\_reclaim (lines 3753--3770) --- not modified by PressurePause]
 \begin{lstlisting}[style=cstyle]
 /* Perform direct synchronous page reclaim */
 static unsigned long
 __perform_reclaim(gfp_t gfp_mask, unsigned int order,
                   const struct alloc_context *ac)
 {
-    ...
+    /* ... reclaim setup and compression retries ... */
     progress = try_to_free_pages(ac->zonelist, order, gfp_mask,
                                  ac->nodemask);
-    ...
+    /* ... */
     return progress;
 }
 \end{lstlisting}
 \end{codebox}
 
-\textbf{Public direct-reclaim wrapper} (\texttt{mm/vmscan.c}):
+\noindent\textbf{Public direct-reclaim wrapper} (\texttt{mm/vmscan.c}, stock function; line numbers from patched tree):
 
-\begin{codebox}[mm/vmscan.c: try\_to\_free\_pages (lines 6406--6446)]
+\begin{codebox}[mm/vmscan.c: try\_to\_free\_pages (lines 6604--6645)]
 \begin{lstlisting}[style=cstyle]
 unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
-                                gfp_t gfp_mask, nodemask_t *nodemask)
+				gfp_t gfp_mask, nodemask_t *nodemask)
 {
-    struct scan_control sc = { ... };
-    ...
-    trace_mm_vmscan_direct_reclaim_begin(order, sc.gfp_mask);
-    nr_reclaimed = do_try_to_free_pages(zonelist, &sc);
-    trace_mm_vmscan_direct_reclaim_end(nr_reclaimed);
-    ...
-    return nr_reclaimed;
+	unsigned long nr_reclaimed;
+	struct scan_control sc = {
+		.nr_to_reclaim = SWAP_CLUSTER_MAX,
+		.gfp_mask = current_gfp_context(gfp_mask),
+		.reclaim_idx = gfp_zone(gfp_mask),
+		.order = order,
+		.nodemask = nodemask,
+		.priority = DEF_PRIORITY,
+		.may_writepage = !laptop_mode,
+		.may_unmap = 1,
+		.may_swap = 1,
+	};
+
+	BUILD_BUG_ON(MAX_PAGE_ORDER >= S8_MAX);
+	BUILD_BUG_ON(DEF_PRIORITY > S8_MAX);
+	BUILD_BUG_ON(MAX_NR_ZONES > S8_MAX);
+
+	if (throttle_direct_reclaim(sc.gfp_mask, zonelist, nodemask))
+		return 1;
+
+	set_task_reclaim_state(current, &sc.reclaim_state);
+	trace_mm_vmscan_direct_reclaim_begin(order, sc.gfp_mask);
+
+	nr_reclaimed = do_try_to_free_pages(zonelist, &sc);
+
+	trace_mm_vmscan_direct_reclaim_end(nr_reclaimed);
+	set_task_reclaim_state(current, NULL);
+
+	return nr_reclaimed;
 }
 \end{lstlisting}
 \end{codebox}
 
-\textbf{Hook call site} (\texttt{mm/vmscan.c}):
+\noindent\textbf{PressurePause hook call site} (\texttt{mm/vmscan.c}):
 
 \begin{codebox}[mm/vmscan.c: do\_try\_to\_free\_pages (lines 6394--6404)]
 \begin{lstlisting}[style=cstyle]
@@ -468,7 +509,10 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 	pressure_pause_maybe(zonelist, sc);
 
 	do {
-		...
+		if (!sc->proactive)
+			vmpressure_prio(sc->gfp_mask, sc->target_mem_cgroup,
+					sc->priority);
+		sc->nr_scanned = 0;
 		shrink_zones(zonelist, sc);
 \end{lstlisting}
 \end{codebox}
@@ -502,8 +546,8 @@ PressurePause & Yes (hook at \texttt{do\_try\_to\_free\_pages}) & No (unless exp
 PSI accounts time tasks spend stalled on memory, I/O, or CPU. For PressurePause, the \textbf{gate} uses memory PSI \texttt{some} avg10 (tasks stalled on memory); \texttt{full} is also sampled for debug peaks.
 
 \begin{itemize}[leftmargin=1.2cm]
-    \item \textbf{Types:} \texttt{PSI\_MEM\_SOME}, \texttt{PSI\_MEM\_FULL} in \texttt{include/linux/psi\_types.h}
-    \item \textbf{Accounting:} \texttt{kernel/sched/psi.c}
+    \item \textbf{Types:} \texttt{PSI\_MEM\_SOME}, \texttt{PSI\_MEM\_FULL} in \texttt{include/linux/psi\_types.h} (unchanged by the patch).
+    \item \textbf{Accounting / readers:} \texttt{kernel/sched/psi.c} extends existing PSI averaging with \texttt{psi\_mem\_full\_avg10()} and \texttt{psi\_mem\_some\_avg10()} (\texttt{include/linux/psi.h} declares them).
     \item \textbf{Userspace:} \texttt{/proc/pressure/memory} (\texttt{some} vs.\ \texttt{full} averages)
 \end{itemize}
 
@@ -537,7 +581,7 @@ Constants in \texttt{mm/vmscan.c}: \texttt{PSI\_MEM\_THRESHOLD\_BPS=1} (0.01\% s
 
 \section{Implementation}
 
-PressurePause changes are applied in the vendored tree at \texttt{kernel/linux}. The same diff is exported as \texttt{kernel/patches/0001-pressurepause.patch}. Saved config: \texttt{kernel/configs/config-6.8.12-pressurepause} (\texttt{CONFIG\_PSI=y}, \texttt{LOCALVERSION="-pressurepause"}).
+PressurePause changes are applied in the vendored tree at \texttt{kernel/linux}. The authoritative unified diff is \texttt{kernel/patches/0001-pressurepause.patch}. The file \texttt{kernel/patches/0002-mm-fix-PSI-threshold-to-basis-points-add-some-PSI-ga.patch} records an intermediate step (e.g.\ alternate basis-point value and minimal debugfs output) and is \emph{superseded}---line numbers, \texttt{PSI\_MEM\_THRESHOLD\_BPS}, and the multi-field debugfs text in this report match \texttt{kernel/linux} and \texttt{0001-pressurepause.patch}. Saved config: \texttt{kernel/configs/config-6.8.12-pressurepause} (\texttt{CONFIG\_PSI=y}, \texttt{LOCALVERSION="-pressurepause"}).
 
 \subsection{Stock path vs.\ patched path}
 
@@ -560,8 +604,16 @@ No debugfs counters & \texttt{/sys/kernel/debug/pressure\_pause\_activations} \\
 \begin{itemize}[leftmargin=1.2cm]
     \item \texttt{include/linux/psi.h} --- export \texttt{psi\_mem\_full\_avg10()}, \texttt{psi\_mem\_some\_avg10()} (and stubs when \texttt{CONFIG\_PSI} is off).
     \item \texttt{kernel/sched/psi.c} --- implement both readers using the same locking path as \texttt{psi\_show()}.
-    \item \texttt{mm/vmscan.c} --- threshold helpers, \texttt{pressure\_pause\_maybe()}, zone/kswapd helpers, debugfs counters, hook call at line~6397.
+    \item \texttt{mm/vmscan.c} --- threshold helpers, \texttt{pressure\_pause\_maybe()}, zone/kswapd helpers, debugfs counters, hook call at line~6397; added \texttt{\#include <linux/sched/loadavg.h>} (line~66).
 \end{itemize}
+
+\subsection{Full patch (authoritative diff)}
+
+The following listing reproduces \texttt{kernel/patches/0001-pressurepause.patch} verbatim (compile \texttt{Report.tex} from the repository root so the path resolves).
+
+\begin{codebox}[Full unified diff: kernel/patches/0001-pressurepause.patch]
+\lstinputlisting[style=patchstyle]{kernel/patches/0001-pressurepause.patch}
+\end{codebox}
 
 \subsection{\texttt{pressure\_pause\_maybe()} control flow}
 
@@ -582,7 +634,7 @@ The first implementation used \texttt{LOAD\_INT(psi\_full) >= 25}, which require
 
 The fix compares the same fixed-point avg10 as \texttt{/proc} using basis points:
 
-\begin{codebox}[mm/vmscan.c: threshold compare (lines 6189--6191, 6332--6336)]
+\begin{codebox}[mm/vmscan.c: threshold compare and gate (lines 6189--6192, 6332--6336)]
 \begin{lstlisting}[style=cstyle]
 static inline bool psi_mem_avg10_exceeds_bps(unsigned long avg, unsigned int bps)
 {
