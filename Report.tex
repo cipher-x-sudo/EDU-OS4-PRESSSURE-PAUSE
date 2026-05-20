@@ -247,6 +247,12 @@ When physical memory is exhausted, allocating threads can enter \textbf{direct r
 
 \textbf{PressurePause} is a kernel modification that adds a bounded, PSI-aware coordination step on the direct reclaim path. When memory PSI \texttt{some} avg10 exceeds 0.01\% (basis-point compare against the same fixed-point values as \texttt{/proc/pressure/memory}), the patch wakes \texttt{kswapd} explicitly and applies a short, capped wait for background progress, then always runs the stock \texttt{shrink\_zones()} priority loop. The design never disables reclaim permanently and always preserves stock behavior on timeout or when guards fire.
 
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\linewidth]{problem-heavy-memory.png}
+    \caption{Host under heavy memory pressure during a memory-intensive workload (elevated swap use and reclaim-related activity). This motivates coordinating foreground direct reclaim with background reclaim.}
+\end{figure}
+
 This report covers the development environment and baseline build (Sections~2--3), component identification (Section~4), design and patch implementation (Sections~5--6), correctness properties (Section~7), and evaluation evidence that the new code path runs (Section~8).
 
 \section{Environment}
@@ -388,6 +394,23 @@ The GRUB boot menu now lists the custom baseline kernel as the first selectable 
 \end{figure}
 
 Baseline install verified: \texttt{/boot/vmlinuz-6.8.12-baseline}, \texttt{/lib/modules/6.8.12-baseline/}, and GRUB entry present (see GRUB screenshot above). Select \textbf{Advanced options for Ubuntu} $\rightarrow$ \textbf{6.8.12-baseline} and confirm \texttt{uname -r} shows \texttt{6.8.12-baseline} before Phase~4 benchmarks.
+
+\subsection{Running kernels: baseline vs PressurePause}
+
+The custom baseline kernel and the PressurePause kernel both boot on the same host; the screenshots below show \texttt{uname -r} (and related shell context) for each installed image.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{baseline-kernel.png}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{pressurepause-kernel.png}
+    \end{minipage}
+    \caption{\textbf{Left:} baseline / unpatched custom build (\texttt{6.8.12-baseline}). \textbf{Right:} patched PressurePause build (\texttt{6.8.12-pressurepause} or \texttt{6.8.12-pressurepause+} depending on \texttt{LOCALVERSION}).}
+\end{figure}
 
 \section{Component Identification}
 
@@ -674,6 +697,23 @@ Mount debugfs if needed (\texttt{sudo mount -t debugfs none /sys/kernel/debug}),
 \caption{PressurePause debugfs counters (\texttt{mm/vmscan.c}).}
 \end{table}
 
+\subsection{Debugfs verification (screenshots)}
+
+The following pair shows \texttt{/sys/kernel/debug/pressure\_pause\_activations} (and related shell output) \textbf{before} wiring the full multi-field counter file vs \textbf{after} booting the final PressurePause kernel and exercising memory pressure so counters and peaks populate.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{before-patch.png}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{after-patch.png}
+    \end{minipage}
+    \caption{\textbf{Left:} debugfs verification before the final counter format / activation behavior. \textbf{Right:} same interface after the patch under load, showing non-zero \texttt{entered}, \texttt{activations}, and skip / peak PSI fields as implemented in \texttt{mm/vmscan.c}.}
+\end{figure}
+
 \subsection{Build and install}
 
 \begin{codebox}[Build patched kernel]
@@ -705,6 +745,19 @@ This section records evidence that the PressurePause code path runs under load; 
 \subsection{Methodology}
 
 Matched pairs on the same host used \texttt{./bench-run.sh} with \texttt{stress-ng --vm N --vm-bytes P\% --timeout 120s}, \texttt{vmstat}, \texttt{pgmajfault}, PSI samples, and debugfs \texttt{pressure\_pause\_activations} snapshots (\texttt{pressure-pause-debugfs-*.txt}). Representative directories: 8 workers / 93\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135148} vs patched \texttt{bench-6.8.12-pressurepause+-20260519-155900}; 4 workers / 85\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135638} vs patched average of \texttt{160116}, \texttt{160400}, and \texttt{160617}.
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{benchmark-baseline.jpeg}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{benchmark-pressurepause.jpeg}
+    \end{minipage}
+    \caption{\textbf{Left:} representative benchmark / monitoring session on the \textbf{baseline} kernel during a \texttt{stress-ng} memory workload. \textbf{Right:} comparable session on the \textbf{PressurePause} kernel (same host class of workload; 120\,s timeouts and tool output as in \texttt{./bench-run.sh}).}
+\end{figure}
 
 \begin{table}[H]
 \centering
