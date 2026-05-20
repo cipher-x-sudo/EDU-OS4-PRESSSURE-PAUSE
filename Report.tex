@@ -100,24 +100,6 @@
     belowskip=2pt
 }
 
-\lstdefinestyle{patchstyle}{
-    basicstyle=\ttfamily\scriptsize,
-    numbers=left,
-    numberstyle=\scriptsize\color{numbercolor},
-    numbersep=8pt,
-    tabsize=8,
-    showspaces=false,
-    showstringspaces=false,
-    breaklines=true,
-    breakatwhitespace=true,
-    columns=fullflexible,
-    keepspaces=true,
-    frame=none,
-    xleftmargin=12pt,
-    aboveskip=4pt,
-    belowskip=4pt
-}
-
 \newtcolorbox{codebox}[1][]{
     enhanced,
     breakable,
@@ -245,11 +227,31 @@
 
 When physical memory is exhausted, allocating threads can enter \textbf{direct reclaim}: they block while the kernel evicts pages synchronously. Under coordinated memory thrash, many threads reclaim in parallel, evicting pages that are immediately refaulted. The working set exceeds available RAM, swap I/O rises, and tail latency degrades.
 
+\begin{figure}[H]
+    \centering
+    \begin{tikzpicture}[
+        node distance=0.55cm,
+        box/.style={rectangle, draw=aublue, rounded corners, thick, align=center,
+            text width=5.8cm, inner sep=4pt, font=\footnotesize\sffamily},
+        arr/.style={-{Stealth[length=2mm]}, thick, aublue!65}
+    ]
+        \node[box] (n1) {Many threads compete for physical RAM};
+        \node[box, below=of n1] (n2) {RAM fills; allocations take the allocator slowpath};
+        \node[box, below=of n2] (n3) {Many threads enter \textbf{direct reclaim} together};
+        \node[box, below=of n3] (n4) {Synchronous reclaim contends; refault and swap traffic spike};
+        \draw[arr] (n1) -- (n2);
+        \draw[arr] (n2) -- (n3);
+        \draw[arr] (n3) -- (n4);
+    \end{tikzpicture}
+    \caption{Conceptual chain from contention to reclaim storms (motivation for coordinating direct reclaim).}
+    \label{fig:thrash-flow}
+\end{figure}
+
 \textbf{PressurePause} is a kernel modification that adds a bounded, PSI-aware coordination step on the direct reclaim path. When memory PSI \texttt{some} avg10 exceeds 0.01\% (basis-point compare against the same fixed-point values as \texttt{/proc/pressure/memory}), the patch wakes \texttt{kswapd} explicitly and applies a short, capped wait for background progress, then always runs the stock \texttt{shrink\_zones()} priority loop. The design never disables reclaim permanently and always preserves stock behavior on timeout or when guards fire.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=\linewidth]{problem-heavy-memory.png}
+    \includegraphics[width=\linewidth,height=0.42\textheight,keepaspectratio]{problem-heavy-memory.png}
     \caption{Host under heavy memory pressure during a memory-intensive workload (elevated swap use and reclaim-related activity). This motivates coordinating foreground direct reclaim with background reclaim.}
 \end{figure}
 
@@ -630,12 +632,288 @@ No debugfs counters & \texttt{/sys/kernel/debug/pressure\_pause\_activations} \\
     \item \texttt{mm/vmscan.c} --- threshold helpers, \texttt{pressure\_pause\_maybe()}, zone/kswapd helpers, debugfs counters, hook call at line~6397; added \texttt{\#include <linux/sched/loadavg.h>} (line~66).
 \end{itemize}
 
-\subsection{Full patch (authoritative diff)}
+\subsection{Full implementation (patched source)}
 
-The following listing reproduces \texttt{kernel/patches/0001-pressurepause.patch} verbatim (compile \texttt{Report.tex} from the repository root so the path resolves).
+The following excerpts match the PressurePause tree at \texttt{kernel/linux} (Linux v6.8.12 with the project patch applied). They are inlined so the report compiles in minimal uploads (e.g.\ Overleaf) without vendoring the full kernel. The machine-readable unified diff for \texttt{patch -p1} remains \texttt{kernel/patches/0001-pressurepause.patch}; after changing the patch, update these listings to stay in sync.
 
-\begin{codebox}[Full unified diff: kernel/patches/0001-pressurepause.patch]
-\lstinputlisting[style=patchstyle]{kernel/patches/0001-pressurepause.patch}
+\begin{codebox}[include/linux/psi.h: prototypes (lines 22--31)]
+\begin{lstlisting}[style=cstyle]
+void psi_memstall_enter(unsigned long *flags);
+void psi_memstall_leave(unsigned long *flags);
+
+unsigned long psi_mem_full_avg10(void);
+unsigned long psi_mem_some_avg10(void);
+
+int psi_show(struct seq_file *s, struct psi_group *group, enum psi_res res);
+struct psi_trigger *psi_trigger_create(struct psi_group *group, char *buf,
+				       enum psi_res res, struct file *file,
+				       struct kernfs_open_file *of);
+\end{lstlisting}
+\end{codebox}
+
+\begin{codebox}[include/linux/psi.h: stubs when \texttt{CONFIG\_PSI} is off (lines 51--56)]
+\begin{lstlisting}[style=cstyle]
+static inline void psi_init(void) {}
+
+static inline void psi_memstall_enter(unsigned long *flags) {}
+static inline void psi_memstall_leave(unsigned long *flags) {}
+static inline unsigned long psi_mem_full_avg10(void) { return 0; }
+static inline unsigned long psi_mem_some_avg10(void) { return 0; }
+\end{lstlisting}
+\end{codebox}
+
+\begin{codebox}[kernel/sched/psi.c: system avg10 readers (lines 1225--1254)]
+\begin{lstlisting}[style=cstyle]
+static unsigned long psi_mem_avg10(enum psi_states state)
+{
+	unsigned long avg;
+	u64 now;
+
+	if (static_branch_likely(&psi_disabled))
+		return 0;
+
+	mutex_lock(&psi_system.avgs_lock);
+	now = sched_clock();
+	collect_percpu_times(&psi_system, PSI_AVGS, NULL);
+	if (now >= psi_system.avg_next_update)
+		psi_system.avg_next_update = update_averages(&psi_system, now);
+	avg = psi_system.avg[state][0];
+	mutex_unlock(&psi_system.avgs_lock);
+
+	return avg;
+}
+
+unsigned long psi_mem_full_avg10(void)
+{
+	return psi_mem_avg10(PSI_MEM_FULL);
+}
+EXPORT_SYMBOL_GPL(psi_mem_full_avg10);
+
+unsigned long psi_mem_some_avg10(void)
+{
+	return psi_mem_avg10(PSI_MEM_SOME);
+}
+EXPORT_SYMBOL_GPL(psi_mem_some_avg10);
+\end{lstlisting}
+\end{codebox}
+
+\begin{codebox}[mm/vmscan.c: added include (lines 63--67)]
+\begin{lstlisting}[style=cstyle]
+#include <linux/swapops.h>
+#include <linux/balloon_compaction.h>
+#include <linux/sched/sysctl.h>
+#include <linux/sched/loadavg.h>
+
+#include "internal.h"
+\end{lstlisting}
+\end{codebox}
+
+\begin{codebox}[mm/vmscan.c: PressurePause under \texttt{\#ifdef CONFIG\_PSI} (lines 6173--6366)]
+\begin{lstlisting}[style=cstyle]
+#ifdef CONFIG_PSI
+/*
+ * PSI avg10 threshold in basis points (100 bps = 1.00% as shown in
+ * /proc/pressure/memory).  Old LOAD_INT(psi) >= 25 compared the integer
+ * part of the fixed-point average to 25, i.e. 25.00% stall -- not 0.25%.
+ * Benchmarks peaked near full avg10=0.18 (0.18%) and never crossed that gate.
+ */
+#define PSI_MEM_THRESHOLD_BPS	1
+#define PRESSURE_PAUSE_MAX_MS	20
+
+/* Same fixed-point units as psi_mem_*_avg10() / /proc/pressure/memory avg10. */
+static inline unsigned long psi_mem_threshold_fixed(unsigned int bps)
+{
+	return (unsigned long)FIXED_1 * bps / 10000;
+}
+
+static inline bool psi_mem_avg10_exceeds_bps(unsigned long avg, unsigned int bps)
+{
+	return avg >= psi_mem_threshold_fixed(bps);
+}
+
+static atomic64_t pressure_pause_activations;
+static atomic64_t pressure_pause_entered;
+static atomic64_t pressure_pause_skip_psi;
+static atomic64_t pressure_pause_skip_zones_ok;
+static atomic64_t pressure_pause_skip_no_reclaimable;
+static atomic64_t pressure_pause_skip_cgroup;
+static atomic64_t pressure_pause_peak_psi_some;
+static atomic64_t pressure_pause_peak_psi_full;
+
+static void pressure_pause_note_psi(unsigned long psi_some, unsigned long psi_full)
+{
+	unsigned long peak;
+
+	peak = atomic64_read(&pressure_pause_peak_psi_some);
+	if (psi_some > peak)
+		atomic64_set(&pressure_pause_peak_psi_some, psi_some);
+
+	peak = atomic64_read(&pressure_pause_peak_psi_full);
+	if (psi_full > peak)
+		atomic64_set(&pressure_pause_peak_psi_full, psi_full);
+}
+
+static int pressure_pause_count_show(struct seq_file *m, void *p)
+{
+	seq_printf(m, "activations %lld\n", atomic64_read(&pressure_pause_activations));
+	seq_printf(m, "entered %lld\n", atomic64_read(&pressure_pause_entered));
+	seq_printf(m, "skip_psi_low %lld\n", atomic64_read(&pressure_pause_skip_psi));
+	seq_printf(m, "skip_zones_ok %lld\n", atomic64_read(&pressure_pause_skip_zones_ok));
+	seq_printf(m, "skip_no_reclaimable %lld\n",
+		   atomic64_read(&pressure_pause_skip_no_reclaimable));
+	seq_printf(m, "skip_cgroup %lld\n", atomic64_read(&pressure_pause_skip_cgroup));
+	seq_printf(m, "peak_psi_some_avg10 %llu.%02llu\n",
+		   LOAD_INT(atomic64_read(&pressure_pause_peak_psi_some)),
+		   LOAD_FRAC(atomic64_read(&pressure_pause_peak_psi_some)));
+	seq_printf(m, "peak_psi_full_avg10 %llu.%02llu\n",
+		   LOAD_INT(atomic64_read(&pressure_pause_peak_psi_full)),
+		   LOAD_FRAC(atomic64_read(&pressure_pause_peak_psi_full)));
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(pressure_pause_count);
+
+static int __init pressure_pause_debugfs_init(void)
+{
+	debugfs_create_file("pressure_pause_activations", 0444, NULL, NULL,
+			    &pressure_pause_count_fops);
+	return 0;
+}
+late_initcall(pressure_pause_debugfs_init);
+
+/* True if any managed zone in the zonelist still needs reclaim (not at min). */
+static bool pressure_pause_under_pressure(struct zonelist *zonelist,
+					  struct scan_control *sc)
+{
+	struct zoneref *z;
+	struct zone *zone;
+	bool any = false;
+
+	for_each_zone_zonelist_nodemask(zone, z, zonelist, sc->reclaim_idx,
+					sc->nodemask) {
+		if (!managed_zone(zone))
+			continue;
+		any = true;
+		if (!zone_watermark_ok(zone, sc->order, min_wmark_pages(zone),
+				       sc->reclaim_idx, 0))
+			return true;
+	}
+	return false;
+}
+
+/* True if any zone has reached min watermarks (progress / relief). */
+static bool pressure_pause_any_zone_ok(struct zonelist *zonelist,
+				       struct scan_control *sc)
+{
+	struct zoneref *z;
+	struct zone *zone;
+
+	for_each_zone_zonelist_nodemask(zone, z, zonelist, sc->reclaim_idx,
+					sc->nodemask) {
+		if (!managed_zone(zone))
+			continue;
+		if (zone_watermark_ok(zone, sc->order, min_wmark_pages(zone),
+				      sc->reclaim_idx, 0))
+			return true;
+	}
+	return false;
+}
+
+static bool pressure_pause_has_reclaimable(struct zonelist *zonelist,
+					   struct scan_control *sc)
+{
+	struct zoneref *z;
+	struct zone *zone;
+
+	for_each_zone_zonelist_nodemask(zone, z, zonelist, sc->reclaim_idx,
+					sc->nodemask) {
+		if (!managed_zone(zone))
+			continue;
+		if (zone_reclaimable_pages(zone))
+			return true;
+	}
+	return false;
+}
+
+static void pressure_pause_wake_kswapd(struct zonelist *zonelist,
+				       struct scan_control *sc)
+{
+	struct zoneref *z;
+	struct zone *zone;
+
+	for_each_zone_zonelist_nodemask(zone, z, zonelist, sc->reclaim_idx,
+					sc->nodemask) {
+		if (!managed_zone(zone))
+			continue;
+		wakeup_kswapd(zone, sc->gfp_mask, sc->order, sc->reclaim_idx);
+	}
+}
+
+/*
+ * PSI-gated bounded coordination before synchronous shrink_zones().
+ * Falls through to stock reclaim on timeout or lack of progress.
+ */
+static void pressure_pause_maybe(struct zonelist *zonelist,
+				 struct scan_control *sc)
+{
+	unsigned long psi_full, psi_some;
+	unsigned long deadline;
+
+	atomic64_inc(&pressure_pause_entered);
+
+	if (cgroup_reclaim(sc)) {
+		atomic64_inc(&pressure_pause_skip_cgroup);
+		return;
+	}
+
+	psi_full = psi_mem_full_avg10();
+	psi_some = psi_mem_some_avg10();
+	pressure_pause_note_psi(psi_some, psi_full);
+
+	/* Gate on memory PSI "some" -- rises earlier than "full" under swap thrash. */
+	if (!psi_mem_avg10_exceeds_bps(psi_some, PSI_MEM_THRESHOLD_BPS)) {
+		atomic64_inc(&pressure_pause_skip_psi);
+		return;
+	}
+
+	if (!pressure_pause_has_reclaimable(zonelist, sc)) {
+		atomic64_inc(&pressure_pause_skip_no_reclaimable);
+		return;
+	}
+
+	/* Only skip if no zone in the zonelist is under min watermarks. */
+	if (!pressure_pause_under_pressure(zonelist, sc)) {
+		atomic64_inc(&pressure_pause_skip_zones_ok);
+		return;
+	}
+
+	pressure_pause_wake_kswapd(zonelist, sc);
+	atomic64_inc(&pressure_pause_activations);
+
+	deadline = jiffies + msecs_to_jiffies(PRESSURE_PAUSE_MAX_MS);
+	while (time_before(jiffies, deadline)) {
+		if (fatal_signal_pending(current))
+			break;
+		if (pressure_pause_any_zone_ok(zonelist, sc))
+			break;
+		schedule_timeout_idle(1);
+	}
+}
+#else
+static void pressure_pause_maybe(struct zonelist *zonelist,
+				 struct scan_control *sc)
+{
+}
+#endif
+\end{lstlisting}
+\end{codebox}
+
+\begin{codebox}[mm/vmscan.c: hook in \texttt{do\_try\_to\_free\_pages} (lines 6394--6397)]
+\begin{lstlisting}[style=cstyle]
+	if (!cgroup_reclaim(sc))
+		__count_zid_vm_events(ALLOCSTALL, sc->reclaim_idx, 1);
+
+	pressure_pause_maybe(zonelist, sc);
+\end{lstlisting}
 \end{codebox}
 
 \subsection{\texttt{pressure\_pause\_maybe()} control flow}
