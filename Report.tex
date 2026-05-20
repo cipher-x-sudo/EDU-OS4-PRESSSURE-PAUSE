@@ -22,6 +22,8 @@
 \usetikzlibrary{arrows.meta,positioning}
 \usepackage{amsmath}
 
+\setlength{\emergencystretch}{5em}
+
 \tcbuselibrary{listings, skins, breakable}
 
 \definecolor{aublue}{RGB}{30,50,90}
@@ -43,6 +45,8 @@
     linkcolor=aublue,
     urlcolor=aublue
 }
+
+\newcommand{\srcfile}[1]{\begingroup\bfseries\color{aublue}\nolinkurl{#1}\endgroup}
 
 \captionsetup{font=small, labelfont={bf,color=aublue}, textfont=it, labelsep=period}
 
@@ -180,7 +184,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small\color{gray}CS325 Semester Project --- PressurePause}
-\fancyhead[R]{\small\color{gray}241110, 242353}
+\fancyhead[R]{\small\color{gray}Huzaifa Huzaifa --- 241110}
 \fancyfoot[C]{\small\color{gray}\thepage}
 \renewcommand{\headrulewidth}{0.5pt}
 \renewcommand{\footrulewidth}{0pt}
@@ -213,8 +217,10 @@
     \begin{tabular}{>{\bfseries}r l}
         Course: & CS325 --- Operating Systems \\
         Instructor: & Dr. Mohammad Imran \\
+        Lab Instructor: & Mam Areaba Fatime \\
         CLO: & CLO 2 \\
-        Reg. IDs: & 241110, 242353 \\
+        Student: & Huzaifa Huzaifa \\
+        Reg. ID: & 241110 \\
         Kernel tree: & Linux v6.8.12 (\texttt{LOCALVERSION=-baseline}) \\
     \end{tabular}
 \end{center}
@@ -263,8 +269,9 @@ This report covers the development environment and baseline build (Sections~2--3
     \item \textbf{Host:} Ubuntu 22.04 (Jammy), x86\_64
     \item \textbf{Fallback kernel:} \texttt{6.8.0-117-generic} (distribution build)
     \item \textbf{Custom baseline:} \texttt{6.8.12-baseline} (vanilla stable v6.8.12, unpatched)
-    \item \textbf{Source:} vendored Linux v6.8.12 at \texttt{kernel/linux} (tag in \texttt{docs/kernel-tag.txt}); PressurePause changes are in-tree; export at \texttt{kernel/patches/0001-pressurepause.patch}
-    \item \textbf{Configuration:} \texttt{make defconfig} (saved as \texttt{kernel/configs/config-6.8.12-baseline})
+    \item \textbf{Source:} vendored Linux v6.8.12 at \srcfile{kernel/linux}; tag recorded in \srcfile{docs/kernel-tag.txt}.
+    \item \textbf{Patch export:} \srcfile{kernel/patches/0001-pressurepause.patch}
+    \item \textbf{Configuration:} \texttt{make defconfig}; saved as \srcfile{kernel/configs/config-6.8.12-baseline}
     \item \textbf{Build:} \texttt{make -j2 LOCALVERSION=-baseline}
     \item \textbf{Tools:} GCC toolchain, \texttt{dwarves}, \texttt{cscope}, \texttt{stress-ng}, \texttt{linux-tools-\$(uname -r)}
 \end{itemize}
@@ -296,7 +303,7 @@ sudo apt install -y build-essential libncurses-dev bison flex libssl-dev \
 
 \subsection{Source Tree}
 
-The kernel tree is vendored in this project repository at \texttt{kernel/linux}; a fresh checkout is \texttt{git clone} of the project, not a nested submodule. During initial setup the stable tree was cloned shallowly on branch \texttt{v6.8}, then checked out at tag \texttt{v6.8.12}:
+The kernel tree is vendored in this project repository at \srcfile{kernel/linux}; a fresh checkout is \texttt{git clone} of the project, not a nested submodule. During initial setup the stable tree was cloned shallowly on branch \texttt{v6.8}, then checked out at tag \texttt{v6.8.12}:
 
 \begin{termbox}[Clone and pin kernel tag]
 \begin{lstlisting}[style=terminal]
@@ -395,7 +402,12 @@ The GRUB boot menu now lists the custom baseline kernel as the first selectable 
     \caption{GRUB menu showing \texttt{Ubuntu, with Linux 6.8.12-baseline} selected, with recovery and fallback Ubuntu kernel entries still available.}
 \end{figure}
 
-Baseline install verified: \texttt{/boot/vmlinuz-6.8.12-baseline}, \texttt{/lib/modules/6.8.12-baseline/}, and GRUB entry present (see GRUB screenshot above). Select \textbf{Advanced options for Ubuntu} $\rightarrow$ \textbf{6.8.12-baseline} and confirm \texttt{uname -r} shows \texttt{6.8.12-baseline} before Phase~4 benchmarks.
+Baseline install verified:
+\begin{itemize}[leftmargin=1.2cm, itemsep=2pt, topsep=3pt]
+    \item boot image \srcfile{/boot/vmlinuz-6.8.12-baseline}
+    \item modules directory \srcfile{/lib/modules/6.8.12-baseline/}
+    \item GRUB entry present, then \texttt{uname -r} confirms \texttt{6.8.12-baseline} before Phase~4 benchmarks
+\end{itemize}
 
 \subsection{Running kernels: baseline vs PressurePause}
 
@@ -416,16 +428,16 @@ The custom baseline kernel and the PressurePause kernel both boot on the same ho
 
 \section{Component Identification}
 
-This section satisfies the course requirement to identify the selected kernel component within the source tree. The analysis targets Linux \textbf{v6.8.12} in \texttt{kernel/linux}. A markdown companion is maintained at \texttt{docs/identification.md}.
+This section satisfies the course requirement to identify the selected kernel component within the source tree. The analysis targets Linux \textbf{v6.8.12} in \srcfile{kernel/linux}. A markdown companion is maintained at \srcfile{docs/identification.md}.
 
 \subsection{Selected Component}
 
 \begin{itemize}[leftmargin=1.2cm]
     \item \textbf{Course category:} Page replacement / reclaim (PressurePause extends direct reclaim coordination).
-    \item \textbf{Kernel source files modified by PressurePause:} \texttt{include/linux/psi.h} (new avg10 reader declarations and stubs), \texttt{kernel/sched/psi.c} (\texttt{psi\_mem\_avg10()} helper and exports), \texttt{mm/vmscan.c} (hook, threshold, debugfs, and \texttt{\#include <linux/sched/loadavg.h>}).
-    \item \textbf{Related upstream (not modified):} \texttt{mm/page\_alloc.c} --- allocator slowpath and \texttt{\_\_perform\_reclaim} call into \texttt{try\_to\_free\_pages()} in \texttt{vmscan.c}; no PressurePause edits.
-    \item \textbf{PSI background (mostly unchanged):} enums such as \texttt{PSI\_MEM\_SOME} / \texttt{PSI\_MEM\_FULL} in \texttt{include/linux/psi\_types.h}; system accounting remains in \texttt{kernel/sched/psi.c}, which the patch extends with the exported readers above.
-    \item \textbf{Implementation hook:} \texttt{pressure\_pause\_maybe()} called from \texttt{do\_try\_to\_free\_pages()} in \texttt{mm/vmscan.c}, line~6397, immediately before the priority loop that calls \texttt{shrink\_zones()}.
+    \item \textbf{Kernel source files modified by PressurePause:} \srcfile{include/linux/psi.h}, \srcfile{kernel/sched/psi.c}, and \srcfile{mm/vmscan.c}.
+    \item \textbf{Related upstream (not modified):} \srcfile{mm/page_alloc.c} --- allocator slowpath and \texttt{\_\_perform\_reclaim} call into \texttt{try\_to\_free\_pages()} in \srcfile{mm/vmscan.c}; no PressurePause edits.
+    \item \textbf{PSI background (mostly unchanged):} memory stall enums remain in \srcfile{include/linux/psi_types.h}; accounting remains in \srcfile{kernel/sched/psi.c}.
+    \item \textbf{Implementation hook:} \texttt{pressure\_pause\_maybe()} is called from \texttt{do\_try\_to\_free\_pages()} in \srcfile{mm/vmscan.c}, just before \texttt{shrink\_zones()}.
 \end{itemize}
 
 \subsection{Call Graph: Allocation to Reclaim}
@@ -433,13 +445,13 @@ This section satisfies the course requirement to identify the selected kernel co
 When \texttt{get\_page\_from\_freelist()} cannot satisfy an allocation (zone free pages below watermarks), control enters the allocator slowpath and eventually direct reclaim:
 
 \begin{enumerate}[leftmargin=1.2cm]
-    \item \texttt{\_\_alloc\_pages\_slowpath} --- \texttt{mm/page\_alloc.c} $\sim$4040
-    \item \texttt{wake\_all\_kswapds} --- \texttt{mm/page\_alloc.c} $\sim$3814 (background reclaim hint)
-    \item \texttt{\_\_alloc\_pages\_direct\_reclaim} --- \texttt{mm/page\_alloc.c} $\sim$3781
-    \item \texttt{psi\_memstall\_enter} / \texttt{\_\_perform\_reclaim} --- \texttt{mm/page\_alloc.c} $\sim$3755--3790
-    \item \texttt{try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6604
-    \item \texttt{do\_try\_to\_free\_pages} --- \texttt{mm/vmscan.c} $\sim$6384; \texttt{pressure\_pause\_maybe()} at $\sim$6397
-    \item \texttt{shrink\_zones} $\rightarrow$ \texttt{shrink\_node} --- \texttt{mm/vmscan.c} (shared reclaim core)
+    \item \texttt{\_\_alloc\_pages\_slowpath} --- \srcfile{mm/page_alloc.c} $\sim$4040
+    \item \texttt{wake\_all\_kswapds} --- \srcfile{mm/page_alloc.c} $\sim$3814 (background reclaim hint)
+    \item \texttt{\_\_alloc\_pages\_direct\_reclaim} --- \srcfile{mm/page_alloc.c} $\sim$3781
+    \item \texttt{psi\_memstall\_enter} / \texttt{\_\_perform\_reclaim} --- \srcfile{mm/page_alloc.c} $\sim$3755--3790
+    \item \texttt{try\_to\_free\_pages} --- \srcfile{mm/vmscan.c} $\sim$6604
+    \item \texttt{do\_try\_to\_free\_pages} --- \srcfile{mm/vmscan.c} $\sim$6384; \texttt{pressure\_pause\_maybe()} at $\sim$6397
+    \item \texttt{shrink\_zones} $\rightarrow$ \texttt{shrink\_node} --- \srcfile{mm/vmscan.c} (shared reclaim core)
 \end{enumerate}
 
 \begin{center}
@@ -466,7 +478,7 @@ When \texttt{get\_page\_from\_freelist()} cannot satisfy an allocation (zone fre
 
 \subsection{Key Code Excerpts}
 
-\noindent\textbf{Upstream (unchanged): direct reclaim entry} (\texttt{mm/page\_alloc.c}):
+\noindent\textbf{Upstream (unchanged): direct reclaim entry} (\srcfile{mm/page_alloc.c}):
 
 \begin{codebox}[mm/page\_alloc.c: \_\_perform\_reclaim (lines 3753--3770) --- not modified by PressurePause]
 \begin{lstlisting}[style=cstyle]
@@ -484,7 +496,7 @@ __perform_reclaim(gfp_t gfp_mask, unsigned int order,
 \end{lstlisting}
 \end{codebox}
 
-\noindent\textbf{Public direct-reclaim wrapper} (\texttt{mm/vmscan.c}, stock function; line numbers from patched tree):
+\noindent\textbf{Public direct-reclaim wrapper} (\srcfile{mm/vmscan.c}, stock function; line numbers from patched tree):
 
 \begin{codebox}[mm/vmscan.c: try\_to\_free\_pages (lines 6604--6645)]
 \begin{lstlisting}[style=cstyle]
@@ -524,7 +536,7 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 \end{lstlisting}
 \end{codebox}
 
-\noindent\textbf{PressurePause hook call site} (\texttt{mm/vmscan.c}):
+\noindent\textbf{PressurePause hook call site} (\srcfile{mm/vmscan.c}):
 
 \begin{codebox}[mm/vmscan.c: do\_try\_to\_free\_pages (lines 6394--6404)]
 \begin{lstlisting}[style=cstyle]
@@ -571,8 +583,8 @@ PressurePause & Yes (hook at \texttt{do\_try\_to\_free\_pages}) & No (unless exp
 PSI accounts time tasks spend stalled on memory, I/O, or CPU. For PressurePause, the \textbf{gate} uses memory PSI \texttt{some} avg10 (tasks stalled on memory); \texttt{full} is also sampled for debug peaks.
 
 \begin{itemize}[leftmargin=1.2cm]
-    \item \textbf{Types:} \texttt{PSI\_MEM\_SOME}, \texttt{PSI\_MEM\_FULL} in \texttt{include/linux/psi\_types.h} (unchanged by the patch).
-    \item \textbf{Accounting / readers:} \texttt{kernel/sched/psi.c} extends existing PSI averaging with \texttt{psi\_mem\_full\_avg10()} and \texttt{psi\_mem\_some\_avg10()} (\texttt{include/linux/psi.h} declares them).
+    \item \textbf{Types:} \texttt{PSI\_MEM\_SOME}, \texttt{PSI\_MEM\_FULL} in \srcfile{include/linux/psi_types.h} (unchanged by the patch).
+    \item \textbf{Accounting / readers:} \srcfile{kernel/sched/psi.c} extends existing PSI averaging with \texttt{psi\_mem\_full\_avg10()} and \texttt{psi\_mem\_some\_avg10()} (\srcfile{include/linux/psi.h} declares them).
     \item \textbf{Userspace:} \texttt{/proc/pressure/memory} (\texttt{some} vs.\ \texttt{full} averages)
 \end{itemize}
 
@@ -580,9 +592,9 @@ PSI accounts time tasks spend stalled on memory, I/O, or CPU. For PressurePause,
 
 \subsection{Hook Justification}
 
-\texttt{shrink\_node()} is shared by both \texttt{kswapd} and direct reclaim. Hooking only at \texttt{do\_try\_to\_free\_pages()} limits changes to the allocating-thread path without affecting background reclaim unless explicitly intended. Hooking at \texttt{shrink\_node()} would require \texttt{!current\_is\_kswapd()} guards and a broader behavioral surface.
+\texttt{shrink\_node()} is shared by both \texttt{kswapd} and direct reclaim. Hooking only at \texttt{do\_try\_to\_free\_pages()} keeps the change on the allocating-thread path. Hooking at \texttt{shrink\_node()} would require extra guards and would affect a broader surface.
 
-Build and boot screenshots for the baseline kernel appear in Section~3; line numbers above refer to the patched v6.8.12 tree in \texttt{kernel/linux}.
+Build and boot screenshots for the baseline kernel appear in Section~3; line numbers above refer to the patched v6.8.12 tree in \srcfile{kernel/linux}.
 
 \section{Design and Alternative Methodologies}
 
@@ -602,11 +614,13 @@ C. User-space only (swappiness, cgroups) & No kernel patch risk & Does not satis
 \caption{Alternative methodologies considered for coordinating reclaim under thrash.}
 \end{table}
 
-Constants in \texttt{mm/vmscan.c}: \texttt{PSI\_MEM\_THRESHOLD\_BPS=1} (0.01\% stall, fixed-point compare via \texttt{psi\_mem\_avg10\_exceeds\_bps()}), \texttt{PRESSURE\_PAUSE\_MAX\_MS=20}. Activation and skip counters: \texttt{/sys/kernel/debug/pressure\_pause\_activations}.
+Constants in \srcfile{mm/vmscan.c}: \texttt{PSI\_MEM\_THRESHOLD\_BPS=1} (0.01\% stall, fixed-point compare via \texttt{psi\_mem\_avg10\_exceeds\_bps()}), \texttt{PRESSURE\_PAUSE\_MAX\_MS=20}. Activation and skip counters: \texttt{/sys/kernel/debug/pressure\_pause\_activations}.
 
 \section{Implementation}
 
-PressurePause changes are applied in the vendored tree at \texttt{kernel/linux}. The authoritative unified diff is \texttt{kernel/patches/0001-pressurepause.patch}. The file \texttt{kernel/patches/0002-mm-fix-PSI-threshold-to-basis-points-add-some-PSI-ga.patch} records an intermediate step (e.g.\ alternate basis-point value and minimal debugfs output) and is \emph{superseded}---line numbers, \texttt{PSI\_MEM\_THRESHOLD\_BPS}, and the multi-field debugfs text in this report match \texttt{kernel/linux} and \texttt{0001-pressurepause.patch}. Saved config: \texttt{kernel/configs/config-6.8.12-pressurepause} (\texttt{CONFIG\_PSI=y}, \texttt{LOCALVERSION="-pressurepause"}).
+PressurePause changes are applied in the vendored tree at \srcfile{kernel/linux}. The authoritative unified diff is \srcfile{kernel/patches/0001-pressurepause.patch}. Saved config: \srcfile{kernel/configs/config-6.8.12-pressurepause} (\texttt{CONFIG\_PSI=y}, \texttt{LOCALVERSION="-pressurepause"}).
+
+The superseded 0002 threshold-fix patch records an intermediate step; the report matches the final tree and \srcfile{0001-pressurepause.patch}.
 
 \subsection{Stock path vs.\ patched path}
 
@@ -618,7 +632,7 @@ PressurePause changes are applied in the vendored tree at \texttt{kernel/linux}.
 \midrule
 \texttt{do\_try\_to\_free\_pages} $\rightarrow$ \texttt{shrink\_zones} loop only & Same entry + \texttt{pressure\_pause\_maybe()} first \\
 No system-wide PSI read at reclaim hook & \texttt{psi\_mem\_some\_avg10()} / \texttt{psi\_mem\_full\_avg10()} \\
-No debugfs counters & \texttt{/sys/kernel/debug/pressure\_pause\_activations} \\
+No debugfs counters & \srcfile{/sys/kernel/debug/pressure_pause_activations} \\
 \bottomrule
 \end{tabular}
 \caption{Direct-reclaim code path before and after the patch.}
@@ -627,14 +641,14 @@ No debugfs counters & \texttt{/sys/kernel/debug/pressure\_pause\_activations} \\
 \subsection{Files changed}
 
 \begin{itemize}[leftmargin=1.2cm]
-    \item \texttt{include/linux/psi.h} --- export \texttt{psi\_mem\_full\_avg10()}, \texttt{psi\_mem\_some\_avg10()} (and stubs when \texttt{CONFIG\_PSI} is off).
-    \item \texttt{kernel/sched/psi.c} --- implement both readers using the same locking path as \texttt{psi\_show()}.
-    \item \texttt{mm/vmscan.c} --- threshold helpers, \texttt{pressure\_pause\_maybe()}, zone/kswapd helpers, debugfs counters, hook call at line~6397; added \texttt{\#include <linux/sched/loadavg.h>} (line~66).
+    \item \srcfile{include/linux/psi.h} --- export PSI avg10 readers and stubs when \texttt{CONFIG\_PSI} is off.
+    \item \srcfile{kernel/sched/psi.c} --- implement both readers using the same locking path as \texttt{psi\_show()}.
+    \item \srcfile{mm/vmscan.c} --- threshold helpers, \texttt{pressure\_pause\_maybe()}, zone/kswapd helpers, debugfs counters, and the hook call.
 \end{itemize}
 
 \subsection{Full implementation (patched source)}
 
-The following excerpts match the PressurePause tree at \texttt{kernel/linux} (Linux v6.8.12 with the project patch applied). They are inlined so the report compiles in minimal uploads (e.g.\ Overleaf) without vendoring the full kernel. The machine-readable unified diff for \texttt{patch -p1} remains \texttt{kernel/patches/0001-pressurepause.patch}; after changing the patch, update these listings to stay in sync.
+The following excerpts match the PressurePause tree at \srcfile{kernel/linux} (Linux v6.8.12 with the project patch applied). They are inlined so the report compiles in minimal uploads (e.g.\ Overleaf) without vendoring the full kernel. The machine-readable unified diff for \texttt{patch -p1} remains \srcfile{kernel/patches/0001-pressurepause.patch}; after changing the patch, update these listings to stay in sync.
 
 \begin{codebox}[include/linux/psi.h: prototypes (lines 22--31)]
 \begin{lstlisting}[style=cstyle]
@@ -1004,13 +1018,18 @@ cd ../.. && ./scripts/install-pressurepause-kernel.sh
 \end{lstlisting}
 \end{codebox}
 
-\textbf{Boot verification:} GRUB $\rightarrow$ Advanced options $\rightarrow$ \texttt{6.8.12-pressurepause} (or \texttt{6.8.12-pressurepause+} when the parent repo has local edits). Confirm \texttt{uname -r}, \texttt{cat /proc/pressure/memory}, and \texttt{./scripts/verify-activation.sh}. The patched kernel booted successfully; repeated 120\,s \texttt{stress-ng} workloads completed without crash or hang, and debugfs \texttt{activations} increased during benchmark runs (Section~8).
+\noindent\textbf{Boot verification:}
+\begin{itemize}[leftmargin=1.2cm, itemsep=2pt, topsep=3pt]
+    \item Boot through GRUB $\rightarrow$ Advanced options, then choose \srcfile{6.8.12-pressurepause} (or \srcfile{6.8.12-pressurepause+} when the parent repo has local edits).
+    \item Confirm \texttt{uname -r}. Then read \srcfile{/proc/pressure/memory} and run \srcfile{./scripts/verify-activation.sh}.
+    \item The patched kernel booted successfully; repeated 120\,s \texttt{stress-ng} workloads completed without crash or hang, and debugfs \texttt{activations} increased during benchmark runs (Section~8).
+\end{itemize}
 
 \section{Correctness and Safety}
 
 \begin{enumerate}[leftmargin=1.2cm]
-    \item \textbf{Bounded wait:} \texttt{PRESSURE\_PAUSE\_MAX\_MS} caps the coordination loop; uses \texttt{schedule\_timeout\_idle(1)} slices.
-    \item \textbf{Never skip reclaim:} \texttt{pressure\_pause\_maybe()} always returns; stock \texttt{shrink\_zones()} priority loop runs afterward.
+    \item \textbf{Bounded wait:} the pause is capped at 20\,ms and uses one-tick idle sleep slices.
+    \item \textbf{Never skip reclaim:} the hook always returns to the stock \texttt{shrink\_zones()} priority loop.
     \item \textbf{kswapd cooperation:} \texttt{wakeup\_kswapd()} is additive; foreground reclaim still proceeds.
     \item \textbf{Livelock guard:} skip pause if \texttt{zone\_reclaimable\_pages()} is zero for all zones in the zonelist.
     \item \textbf{Fallback:} Ubuntu \texttt{6.8.0-117-generic} and \texttt{6.8.12-baseline} remain in GRUB if the patched kernel panics.
@@ -1022,7 +1041,15 @@ This section records evidence that the PressurePause code path runs under load; 
 
 \subsection{Methodology}
 
-Matched pairs on the same host used \texttt{./bench-run.sh} with \texttt{stress-ng --vm N --vm-bytes P\% --timeout 120s}, \texttt{vmstat}, \texttt{pgmajfault}, PSI samples, and debugfs \texttt{pressure\_pause\_activations} snapshots (\texttt{pressure-pause-debugfs-*.txt}). Representative directories: 8 workers / 93\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135148} vs patched \texttt{bench-6.8.12-pressurepause+-20260519-155900}; 4 workers / 85\% --- baseline \texttt{bench-6.8.12-baseline-20260519-135638} vs patched average of \texttt{160116}, \texttt{160400}, and \texttt{160617}.
+Matched pairs on the same host used \srcfile{./bench-run.sh} with 120\,s \texttt{stress-ng} memory workloads, \texttt{vmstat}, \texttt{pgmajfault}, PSI samples, and debugfs activation snapshots (\srcfile{pressure-pause-debugfs-*.txt}).
+
+Representative directories:
+\begin{itemize}[leftmargin=1.2cm, itemsep=2pt, topsep=3pt]
+    \item \textbf{8 workers / 93\%:} baseline \srcfile{bench-6.8.12-baseline-20260519-135148}\\
+    patched \srcfile{bench-6.8.12-pressurepause+-20260519-155900}.
+    \item \textbf{4 workers / 85\%:} baseline \srcfile{bench-6.8.12-baseline-20260519-135638}\\
+    patched runs \srcfile{160116}, \srcfile{160400}, and \srcfile{160617}.
+\end{itemize}
 
 \begin{figure}[H]
     \centering
