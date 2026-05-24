@@ -23,6 +23,7 @@
 \usepackage{amsmath}
 
 \setlength{\emergencystretch}{5em}
+\setlength{\headheight}{14pt}
 
 \tcbuselibrary{listings, skins, breakable}
 
@@ -183,7 +184,7 @@
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\color{gray}CS325 Semester Project --- PressurePause}
+\fancyhead[L]{\small\color{gray}CS325 Semester Project --- Linux Kernel Modification}
 \fancyhead[R]{\small\color{gray}Huzaifa Huzaifa --- 241110}
 \fancyfoot[C]{\small\color{gray}\thepage}
 \renewcommand{\headrulewidth}{0.5pt}
@@ -210,8 +211,9 @@
 
 \begin{center}
     \IfFileExists{aulogo.png}{\includegraphics[width=3cm]{aulogo.png}\\[0.8cm]}{}
-    {\color{aublue}\fontsize{28}{36}\selectfont\bfseries PressurePause Reclaimer}\\[0.35cm]
-    {\color{black!85}\fontsize{16}{22}\selectfont\bfseries PSI-Gated Direct Reclaim Coordination}\\[0.25cm]
+    {\color{aublue}\fontsize{24}{30}\selectfont\bfseries Modification of Linux OS Kernel}\\[0.18cm]
+    {\color{aublue}\fontsize{18}{24}\selectfont\bfseries PSI-Gated Memory Reclaim Coordination}\\[0.35cm]
+    {\color{black!85}\fontsize{16}{22}\selectfont\bfseries PressurePause: Direct Reclaim Coordination}\\[0.25cm]
     {\color{black!70}\fontsize{13}{18}\selectfont CS325 Semester Project (CLO 2) --- Linux Kernel Modification}\\[1.1cm]
 
     \begin{tabular}{>{\bfseries}r l}
@@ -221,7 +223,7 @@
         CLO: & CLO 2 \\
         Student: & Huzaifa Huzaifa \\
         Reg. ID: & 241110 \\
-        Kernel tree: & Linux v6.8.12 (\texttt{LOCALVERSION=-baseline}) \\
+        Kernel tree: & Linux v6.8.12: \texttt{6.8.12-baseline} and \texttt{6.8.12-pressurepause+} \\
     \end{tabular}
 \end{center}
 
@@ -269,14 +271,28 @@ This report covers the development environment and baseline build (Sections~2--3
     \item \textbf{Host:} Ubuntu 22.04 (Jammy), x86\_64
     \item \textbf{Fallback kernel:} \texttt{6.8.0-117-generic} (distribution build)
     \item \textbf{Custom baseline:} \texttt{6.8.12-baseline} (vanilla stable v6.8.12, unpatched)
+    \item \textbf{Patched kernel:} \texttt{6.8.12-pressurepause+} (v6.8.12 with PressurePause)
     \item \textbf{Source:} vendored Linux v6.8.12 at \srcfile{kernel/linux}; tag recorded in \srcfile{docs/kernel-tag.txt}.
     \item \textbf{Patch export:} \srcfile{kernel/patches/0001-pressurepause.patch}
-    \item \textbf{Configuration:} \texttt{make defconfig}; saved as \srcfile{kernel/configs/config-6.8.12-baseline}
+    \item \textbf{Configurations:} saved as \srcfile{kernel/configs/config-6.8.12-baseline} and \srcfile{kernel/configs/config-6.8.12-pressurepause}
     \item \textbf{Build:} \texttt{make -j2 LOCALVERSION=-baseline}
     \item \textbf{Tools:} GCC toolchain, \texttt{dwarves}, \texttt{cscope}, \texttt{stress-ng}, \texttt{linux-tools-\$(uname -r)}
 \end{itemize}
 
 Defconfig was chosen instead of copying the Ubuntu \texttt{/boot/config-*} file to avoid missing certificate paths (e.g.\ \texttt{SYSTEM\_TRUSTED\_KEYS}) that broke an earlier vanilla build attempt.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Kernel} & \textbf{CONFIG\_PSI} & \textbf{CONFIG\_DEBUG\_FS} \\
+\midrule
+\texttt{6.8.12-baseline} & not set in saved defconfig & \texttt{y} \\
+\texttt{6.8.12-pressurepause+} & \texttt{y} & \texttt{y} \\
+\bottomrule
+\end{tabular}
+\caption{Configuration evidence from the saved kernel configs. Performance comparison uses common \texttt{vmstat}, swap, and page-fault metrics; PSI/debugfs counters verify the patched PressurePause path.}
+\end{table}
 
 \section{Kernel Build and Boot}
 
@@ -1066,31 +1082,66 @@ Representative directories:
 
 \begin{table}[H]
 \centering
-\begin{tabular}{@{}lccc@{}}
+\begin{tabular}{@{}llrr@{}}
 \toprule
-\textbf{Workload} & \textbf{Metric} & \textbf{Baseline} & \textbf{PressurePause+} \\
+\textbf{Workload} & \textbf{Metric} & \textbf{Baseline} & \textbf{PressurePause+ / Change} \\
 \midrule
-8 vm / 93\% & Avg swap-out (KB/s) & 31222.5 & 25638.6 \\
-8 vm / 93\% & End swap (KB) & 37992 & 25952 \\
-8 vm / 93\% & \texttt{activations} $\Delta$ & -- & +40 \\
-8 vm / 93\% & \texttt{pgmajfault} $\Delta$ & 222 & 321 \\
-4 vm / 85\% & Avg swap-out (KB/s) & 33380.0 & 22791.8 \\
-4 vm / 85\% & Max swapped (KB) & 1215952 & 913977.3 \\
-4 vm / 85\% & End swap (KB) & 91676 & 26104 \\
-4 vm / 85\% & \texttt{activations} $\Delta$ & -- & +15 total \\
-4 vm / 85\% & \texttt{pgmajfault} $\Delta$ & 5 & 112.7 \\
+8 vm / 93\% & Avg swap-out (KB/s) & 31,222.5 & 25,638.6 ($-17.9\%$) \\
+8 vm / 93\% & End swap (KB) & 37,992 & 25,952 ($-31.7\%$) \\
+8 vm / 93\% & \texttt{pgmajfault} $\Delta$ & 222 & 321 ($+44.6\%$) \\
+8 vm / 93\% & \texttt{activations} $\Delta$ & -- & +40 observed \\
+4 vm / 85\% & Avg swap-out (KB/s) & 33,380.0 & 22,791.8 ($-31.7\%$) \\
+4 vm / 85\% & Max swapped (KB) & 1,215,952 & 913,977.3 ($-24.8\%$) \\
+4 vm / 85\% & End swap (KB) & 91,676 & 26,104 ($-71.5\%$) \\
+4 vm / 85\% & \texttt{pgmajfault} $\Delta$ & 5 & 112.7 ($+2154\%$) \\
+4 vm / 85\% & \texttt{activations} $\Delta$ & -- & +15 observed \\
 \bottomrule
 \end{tabular}
-\caption{Matched benchmark summary (May 2026). Patched runs used the rebuilt PressurePause+ kernel with debugfs activation counters. The 4 vm / 85\% patched column averages three patched trials.}
+\caption{Matched benchmark summary. Lower swap metrics are better; major page faults are shown as the main tradeoff. Patched activation counts are verified through debugfs.}
 \end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=0.075cm,y=0.9cm,font=\footnotesize\sffamily]
+    \foreach \x/\lab in {0/0,25/25,50/50,75/75,100/100} {
+        \draw[black!15] (\x,-0.2) -- (\x,3.05);
+        \node[anchor=north, text=black!65] at (\x,-0.25) {\lab};
+    }
+    \node[anchor=west, text=black!65] at (0,3.25) {Normalized to baseline = 100\% (lower is better)};
+
+    \node[anchor=east] at (-3,2.55) {8 vm / 93\% avg swap-out};
+    \fill[black!25] (0,2.67) rectangle (100,2.87);
+    \fill[aublue!75] (0,2.40) rectangle (82.1,2.60);
+    \node[anchor=west] at (101,2.73) {100};
+    \node[anchor=west] at (83.1,2.50) {82.1};
+
+    \node[anchor=east] at (-3,1.55) {4 vm / 85\% avg swap-out};
+    \fill[black!25] (0,1.67) rectangle (100,1.87);
+    \fill[aublue!75] (0,1.40) rectangle (68.3,1.60);
+    \node[anchor=west] at (101,1.73) {100};
+    \node[anchor=west] at (69.3,1.50) {68.3};
+
+    \node[anchor=east] at (-3,0.55) {4 vm / 85\% end swap};
+    \fill[black!25] (0,0.67) rectangle (100,0.87);
+    \fill[aublue!75] (0,0.40) rectangle (28.5,0.60);
+    \node[anchor=west] at (101,0.73) {100};
+    \node[anchor=west] at (29.5,0.50) {28.5};
+
+    \fill[black!25] (0,-0.85) rectangle (4,-0.65);
+    \node[anchor=west] at (5,-0.75) {Baseline};
+    \fill[aublue!75] (28,-0.85) rectangle (32,-0.65);
+    \node[anchor=west] at (33,-0.75) {PressurePause+};
+\end{tikzpicture}
+\caption{Visual comparison of the strongest swap-pressure improvements. Values are normalized percentages relative to the baseline run for each metric.}
+\end{figure}
 
 \subsection{Discussion}
 
-Kernels built with the original \texttt{LOAD\_INT(psi\_full) >= 25} gate could complete stress workloads with \textbf{zero} \texttt{activations} because observed \texttt{full} avg10 never reached 25\%. After the basis-point gate on \texttt{some} avg10 (Section~6.3), debugfs confirms the hook runs: on the 8\,vm / 93\% workload, \texttt{activations} rose from 15 to 55 (+40) during the run; on one 4\,vm / 85\% trial (\texttt{160617}), +15 activations. Matched baseline vs patched runs also show lower swap-out and residual swap on the patched kernel, with higher \texttt{pgmajfault} as a documented tradeoff (average swap-out $-$17.9\% on 8\,vm / 93\%, $-$31.7\% on the 4\,vm / 85\% patched average).
+Kernels built with the original \texttt{LOAD\_INT(psi\_full) >= 25} gate could complete stress workloads with \textbf{zero} \texttt{activations} because observed \texttt{full} avg10 never reached 25\%. After the basis-point gate on \texttt{some} avg10 (Section~6.3), debugfs confirms the hook runs: on the 8\,vm / 93\% workload, \texttt{activations} rose from 15 to 55 (+40) during the run; on one 4\,vm / 85\% trial (\texttt{160617}), +15 activations. Matched baseline vs patched runs show lower swap-out and residual swap on the patched kernel, with higher \texttt{pgmajfault} as a documented tradeoff.
 
 \subsection{Limitations}
 
-This is not a full statistical study. PSI samples are every 5\,s and can miss short spikes seen at the reclaim hook, which is why the debugfs activation counter is more important than sampled \texttt{avg10} alone. Baseline PSI still reports ``no PSI,'' so baseline and patched PSI totals cannot be compared directly. Major-fault counts rise on the patched kernel; future work should add repeated trials, latency percentiles, and a workload sweep to find where the swap reduction is worth the fault-cost tradeoff.
+This is not a full statistical study. PSI samples are every 5\,s and can miss short spikes seen at the reclaim hook, which is why the debugfs activation counter is more important than sampled \texttt{avg10} alone. The saved baseline defconfig does not enable \texttt{CONFIG\_PSI}, so PSI/debugfs data is used as patched-kernel activation evidence rather than as a cross-kernel comparison metric. Major-fault counts rise on the patched kernel; future work should add repeated trials, latency percentiles, and a workload sweep to find where the swap reduction is worth the fault-cost tradeoff.
 
 \section{Conclusion}
 
